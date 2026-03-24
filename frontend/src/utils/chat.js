@@ -10,7 +10,7 @@ function escapeHtml(value) {
 
 export function renderMarkdown(text, sources = []) {
   if (!text) return "";
-  let markdownText = String(text);
+  const markdownText = String(text);
   if (!Array.isArray(sources) || !sources.length) {
     return marked.parse(markdownText);
   }
@@ -31,53 +31,9 @@ export function renderMarkdown(text, sources = []) {
     return `<a class="inline-citation" href="${escapeHtml(source.jump_url)}" target="_blank" rel="noreferrer" title="${escapeHtml(title)}">${escapeHtml(label)}</a>`;
   }
 
-  function renderCitationGroup(indices) {
-    const anchors = indices
-      .map((index) => renderCitationAnchor(index))
-      .filter(Boolean);
-    return anchors.length ? anchors.join(" ") : null;
-  }
-
-  const placeholders = new Map();
-  let placeholderIndex = 0;
-
-  function injectPlaceholder(rendered, fallback) {
-    if (!rendered) {
-      return fallback;
-    }
-    const token = `@@BILIBRAIN_CITATION_${placeholderIndex}@@`;
-    placeholderIndex += 1;
-    placeholders.set(token, rendered);
-    return token;
-  }
-
-  markdownText = markdownText.replace(/（\s*资料\s*((?:\[\d+\]\s*(?:[、，,]\s*\[\d+\]\s*)*))）/g, (match, rawGroup) => {
-    const indices = String(rawGroup || "").match(/\d+/g) || [];
-    return injectPlaceholder(renderCitationGroup(indices), match);
+  return marked.parse(markdownText).replace(/【(\d+)】/g, (_, rawIndex) => {
+    return renderCitationAnchor(rawIndex) || `【${rawIndex}】`;
   });
-
-  markdownText = markdownText.replace(/\(\s*资料\s*((?:\[\d+\]\s*(?:[、，,]\s*\[\d+\]\s*)*))\)/g, (match, rawGroup) => {
-    const indices = String(rawGroup || "").match(/\d+/g) || [];
-    return injectPlaceholder(renderCitationGroup(indices), match);
-  });
-
-  markdownText = markdownText.replace(/【(\d+)】/g, (_, rawIndex) => {
-    return injectPlaceholder(renderCitationAnchor(rawIndex), `【${rawIndex}】`);
-  });
-
-  markdownText = markdownText.replace(/资料\s*\[(\d+)\]/g, (match, rawIndex) => {
-    return injectPlaceholder(renderCitationAnchor(rawIndex), match);
-  });
-
-  markdownText = markdownText.replace(/资料\s*(\d+)/g, (match, rawIndex) => {
-    return injectPlaceholder(renderCitationAnchor(rawIndex), match);
-  });
-
-  let html = marked.parse(markdownText);
-  for (const [token, rendered] of placeholders.entries()) {
-    html = html.replaceAll(token, rendered);
-  }
-  return html;
 }
 
 export function normalizeChatMessage(message, fallbackConversationId = null) {

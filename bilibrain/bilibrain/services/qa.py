@@ -10,6 +10,7 @@ from bilibrain.services.chat_memory import (
     refresh_context_stats_after_message,
     should_compact_context,
 )
+from bilibrain.services.citations import normalize_answer_citations
 from bilibrain.services.common import (
     build_jump_url,
     rerank_search_hits,
@@ -47,8 +48,6 @@ PLANNER_HINT_KEYWORDS = (
     "归纳",
     "梳理",
 )
-
-
 def sse_event(event: str, data: dict[str, Any] | None = None) -> str:
     payload = json.dumps(data or {}, ensure_ascii=False)
     return f"event: {event}\ndata: {payload}\n\n"
@@ -271,7 +270,7 @@ async def build_summary_answer(
         memory_text=memory_text,
     )
     return {
-        "answer": answer,
+        "answer": normalize_answer_citations(answer),
         "sources": build_summary_sources(documents, limit=20),
     }
 
@@ -396,6 +395,7 @@ async def answer_question(
             context.recent_history,
             memory_text=context.memory_text,
         )
+        answer = normalize_answer_citations(answer)
         assistant_message = runtime.db.append_chat_message(
             conversation["conversation_id"],
             "assistant",
@@ -482,6 +482,7 @@ async def answer_question(
 
     sources = build_sources(matches)
     answer = await runtime.qwen.answer(query, matches, effective_history, memory_text=effective_memory_text)
+    answer = normalize_answer_citations(answer)
     assistant_message = runtime.db.append_chat_message(
         conversation["conversation_id"],
         "assistant",
@@ -562,7 +563,7 @@ async def stream_answer_events(
             ):
                 answer_fragments.append(delta)
                 yield sse_event("answer", {"delta": delta})
-            answer_text = "".join(answer_fragments).strip()
+            answer_text = normalize_answer_citations("".join(answer_fragments).strip())
             if answer_text:
                 assistant_message = runtime.db.append_chat_message(
                     conversation["conversation_id"],
@@ -610,7 +611,7 @@ async def stream_answer_events(
                 ):
                     answer_fragments.append(delta)
                     yield sse_event("answer", {"delta": delta})
-                answer_text = "".join(answer_fragments).strip()
+                answer_text = normalize_answer_citations("".join(answer_fragments).strip())
                 if answer_text:
                     assistant_message = runtime.db.append_chat_message(
                         conversation["conversation_id"],
@@ -671,7 +672,7 @@ async def stream_answer_events(
         ):
             answer_fragments.append(delta)
             yield sse_event("answer", {"delta": delta})
-        answer_text = "".join(answer_fragments).strip()
+        answer_text = normalize_answer_citations("".join(answer_fragments).strip())
         if answer_text:
             assistant_message = runtime.db.append_chat_message(
                 conversation["conversation_id"],
@@ -688,7 +689,7 @@ async def stream_answer_events(
             )
         yield sse_event("done")
     except Exception as exc:
-        answer_text = "".join(answer_fragments).strip()
+        answer_text = normalize_answer_citations("".join(answer_fragments).strip())
         if answer_text:
             assistant_message = runtime.db.append_chat_message(
                 conversation["conversation_id"],
