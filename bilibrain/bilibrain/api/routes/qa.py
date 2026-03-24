@@ -5,13 +5,14 @@ from fastapi.responses import StreamingResponse
 
 from bilibrain.api.deps import get_runtime
 from bilibrain.core.runtime import Runtime
-from bilibrain.schemas.requests import AskRequest, ChatConversationCreateRequest
+from bilibrain.schemas.requests import AskRequest, ChatConversationCreateRequest, ChatConversationRenameRequest
 from bilibrain.services.qa import (
     answer_question,
     create_chat_conversation,
     delete_chat_conversation,
     get_chat_history,
     list_chat_conversations,
+    rename_chat_conversation,
     stream_answer_events,
 )
 
@@ -50,6 +51,15 @@ async def chat_conversations_delete(
     runtime: Runtime = Depends(get_runtime),
 ) -> dict[str, object]:
     return await delete_chat_conversation(runtime, conversation_id)
+
+
+@router.patch("/api/chat/conversations/{conversation_id}")
+async def chat_conversations_rename(
+    conversation_id: int,
+    payload: ChatConversationRenameRequest,
+    runtime: Runtime = Depends(get_runtime),
+) -> dict[str, object]:
+    return await rename_chat_conversation(runtime, conversation_id, payload.title)
 
 
 @router.post("/api/ask")

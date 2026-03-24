@@ -4,6 +4,12 @@ import json
 from typing import Any, AsyncIterator
 
 from bilibrain.core.runtime import Runtime
+from bilibrain.services.chat_memory import (
+    build_conversation_context,
+    compact_conversation_context,
+    refresh_context_stats_after_message,
+    should_compact_context,
+)
 from bilibrain.services.common import (
     build_jump_url,
     rerank_search_hits,
@@ -22,6 +28,25 @@ ASK_EMPTY_MESSAGE = "当前没有可检索的视频内容。请先在左侧选�
 STREAM_EMPTY_MESSAGE = "当前没有可检索的视频内容。请先完成至少一个视频的处理。"
 SUMMARY_REDUCE_DOC_THRESHOLD = 12
 SUMMARY_REDUCE_CHAR_THRESHOLD = 16000
+PLANNER_HINT_KEYWORDS = (
+    "前面",
+    "刚才",
+    "之前",
+    "上一轮",
+    "上一次",
+    "上个",
+    "那个",
+    "这个",
+    "第二点",
+    "第三点",
+    "继续",
+    "展开",
+    "补充",
+    "总结",
+    "概括",
+    "归纳",
+    "梳理",
+)
 
 
 def sse_event(event: str, data: dict[str, Any] | None = None) -> str:
@@ -133,6 +158,13 @@ def load_chat_history(runtime: Runtime, conversation_id: int) -> list[dict[str, 
     return runtime.db.list_chat_messages(conversation_id)
 
 
+def should_use_planner(query: str) -> bool:
+    payload = " ".join(str(query or "").lower().split())
+    if not payload:
+        return False
+    return any(keyword in payload for keyword in PLANNER_HINT_KEYWORDS)
+
+
 async def list_chat_conversations(runtime: Runtime, folder_id: int | None) -> dict[str, Any]:
     conversations = runtime.db.list_chat_conversations(None, all_scopes=True)
     latest = conversations[0]["conversation_id"] if conversations else None
@@ -171,6 +203,21 @@ async def delete_chat_conversation(runtime: Runtime, conversation_id: int) -> di
     }
 
 
+async def rename_chat_conversation(
+    runtime: Runtime,
+    conversation_id: int,
+    title: str,
+) -> dict[str, Any]:
+    conversation = runtime.db.rename_chat_conversation(int(conversation_id), title)
+    if not conversation:
+        raise RuntimeError("对话会话不存在，请刷新页面后重试。")
+    conversations = runtime.db.list_chat_conversations(None, all_scopes=True)
+    return {
+        "conversation": conversation,
+        "conversations": conversations,
+    }
+
+
 async def get_chat_history(
     runtime: Runtime,
     folder_id: int | None,
@@ -204,24 +251,99 @@ async def build_summary_answer(
     bvid: str | None,
     scope_mode: str | None,
     history: list[dict[str, Any]],
+    memory_text: str = "",
 ) -> dict[str, Any] | None:
-    routing = classify_query_intent(query, folder_id=folder_id, bvid=bvid, scope_mode=scope_mode)
-    if routing["intent"] == "detail_qa":
-        return None
+    scope = resolve_query_scope(folder_id=folder_id, bvid=bvid, scope_mode=scope_mode)
 
     documents = await load_summary_documents(
         runtime,
-        folder_id=folder_id if routing["scope"] == "folder" else None,
-        bvid=bvid if routing["scope"] == "video" else None,
+        folder_id=scope["folder_id"] if scope["scope"] == "folder" else None,
+        bvid=scope["bvid"] if scope["scope"] == "video" else None,
     )
     if not documents:
         return None
 
     answer_documents = await _reduce_summary_documents(runtime, query, documents)
-    answer = await runtime.qwen.answer_from_summary_documents(query, answer_documents, history)
+    answer = await runtime.qwen.answer_from_summary_documents(
+        query,
+        answer_documents,
+        history,
+        memory_text=memory_text,
+    )
     return {
         "answer": answer,
         "sources": build_summary_sources(documents, limit=20),
+    }
+
+
+def describe_query_scope(
+    runtime: Runtime,
+    *,
+    folder_id: int | None,
+    bvid: str | None,
+    scope_mode: str | None,
+) -> str:
+    scope = resolve_query_scope(folder_id=folder_id, bvid=bvid, scope_mode=scope_mode)
+    if scope["scope"] == "video" and scope.get("bvid"):
+        video = runtime.db.get_video(str(scope["bvid"])) or {}
+        title = str(video.get("title") or scope["bvid"])
+        return f"当前范围是单个视频：{title}（bvid={scope['bvid']}）。"
+    if scope["scope"] == "folder" and scope.get("folder_id") is not None:
+        folder = runtime.db.get_folder(int(scope["folder_id"])) or {}
+        title = str(folder.get("title") or f"收藏夹 {scope['folder_id']}")
+        return f"当前范围是单个收藏夹：{title}（folder_id={scope['folder_id']}）。"
+    return "当前范围是全部已入库内容。"
+
+
+async def resolve_query_plan(
+    runtime: Runtime,
+    *,
+    query: str,
+    folder_id: int | None,
+    bvid: str | None,
+    scope_mode: str | None,
+    history: list[dict[str, Any]],
+    memory_text: str = "",
+) -> dict[str, Any]:
+    if not should_use_planner(query):
+        intent = classify_query_intent(query, folder_id=folder_id, bvid=bvid, scope_mode=scope_mode)
+        route = "summary_only" if intent["intent"] != "detail_qa" else "chunk_only"
+        return {
+            "route": route,
+            "use_history": True,
+            "use_current_scope": True,
+            "retrieval_mode": "summary" if route == "summary_only" else "chunk",
+            "reason": "命中直接规则，跳过 LLM planner。",
+        }
+
+    scope_description = describe_query_scope(
+        runtime,
+        folder_id=folder_id,
+        bvid=bvid,
+        scope_mode=scope_mode,
+    )
+    plan = await runtime.qwen.plan_query(
+        query=query,
+        scope_description=scope_description,
+        history=history,
+        memory_text=memory_text,
+    )
+    route = plan.route
+    retrieval_mode = plan.retrieval_mode
+    if route == "history_only":
+        retrieval_mode = "none"
+    elif route == "summary_only":
+        retrieval_mode = "summary"
+    elif route == "chunk_only":
+        retrieval_mode = "chunk"
+    elif route == "mixed" and retrieval_mode == "none":
+        retrieval_mode = "chunk"
+    return {
+        "route": route,
+        "use_history": bool(plan.use_history),
+        "use_current_scope": bool(plan.use_current_scope),
+        "retrieval_mode": retrieval_mode,
+        "reason": str(plan.reason or "").strip(),
     }
 
 
@@ -240,64 +362,145 @@ async def answer_question(
         scope["folder_id"] if scope["scope"] == "folder" else None,
         conversation_id,
     )
-    history = load_chat_history(runtime, conversation["conversation_id"])
-    runtime.db.append_chat_message(conversation["conversation_id"], "user", query)
-    routing = classify_query_intent(query, folder_id=folder_id, bvid=bvid, scope_mode=scope_mode)
+    context = build_conversation_context(
+        runtime,
+        conversation_id=conversation["conversation_id"],
+    )
+    if should_compact_context(runtime, context):
+        context = await compact_conversation_context(
+            runtime,
+            conversation_id=conversation["conversation_id"],
+            context=context,
+        )
+    user_message = runtime.db.append_chat_message(conversation["conversation_id"], "user", query)
+    refresh_context_stats_after_message(
+        runtime,
+        conversation_id=conversation["conversation_id"],
+        message=user_message,
+    )
+    plan = await resolve_query_plan(
+        runtime,
+        query=query,
+        folder_id=folder_id,
+        bvid=bvid,
+        scope_mode=scope_mode,
+        history=context.recent_history,
+        memory_text=context.memory_text,
+    )
+    effective_history = context.recent_history if plan["use_history"] else []
+    effective_memory_text = context.memory_text if plan["use_history"] else ""
 
-    try:
-        summary_payload = await build_summary_answer(runtime, query, folder_id, bvid, scope_mode, history)
-    except Exception:
-        summary_payload = None
-    if summary_payload:
-        runtime.db.append_chat_message(
+    if plan["route"] == "history_only":
+        answer = await runtime.qwen.answer_from_history(
+            query,
+            context.recent_history,
+            memory_text=context.memory_text,
+        )
+        assistant_message = runtime.db.append_chat_message(
             conversation["conversation_id"],
             "assistant",
-            summary_payload["answer"],
-            sources=summary_payload["sources"],
-            answer_mode="summary",
+            answer,
+            sources=[],
+            answer_mode=None,
+            route_mode=plan["route"],
+        )
+        refresh_context_stats_after_message(
+            runtime,
+            conversation_id=conversation["conversation_id"],
+            message=assistant_message,
         )
         return {
             "conversation_id": conversation["conversation_id"],
-            "answer": summary_payload["answer"],
-            "sources": summary_payload["sources"],
-            "answer_mode": "summary",
+            "answer": answer,
+            "sources": [],
+            "answer_mode": None,
+            "route_mode": plan["route"],
         }
+
+    if plan["retrieval_mode"] == "summary":
+        try:
+            summary_payload = await build_summary_answer(
+                runtime,
+                query,
+                folder_id,
+                bvid,
+                scope_mode,
+                effective_history,
+                memory_text=effective_memory_text,
+            )
+        except Exception:
+            summary_payload = None
+        if summary_payload:
+            assistant_message = runtime.db.append_chat_message(
+                conversation["conversation_id"],
+                "assistant",
+                summary_payload["answer"],
+                sources=summary_payload["sources"],
+                answer_mode="summary",
+                route_mode=plan["route"],
+            )
+            refresh_context_stats_after_message(
+                runtime,
+                conversation_id=conversation["conversation_id"],
+                message=assistant_message,
+            )
+            return {
+                "conversation_id": conversation["conversation_id"],
+                "answer": summary_payload["answer"],
+                "sources": summary_payload["sources"],
+                "answer_mode": "summary",
+                "route_mode": plan["route"],
+            }
 
     matches = await search_matches(
         runtime,
         query,
-        folder_id if routing["scope"] == "folder" else None,
-        bvid=bvid if routing["scope"] == "video" else None,
+        scope["folder_id"] if scope["scope"] == "folder" else None,
+        bvid=scope["bvid"] if scope["scope"] == "video" else None,
     )
     if not matches:
-        runtime.db.append_chat_message(
+        assistant_message = runtime.db.append_chat_message(
             conversation["conversation_id"],
             "assistant",
             ASK_EMPTY_MESSAGE,
             sources=[],
             answer_mode="chunk",
+            route_mode=plan["route"],
+        )
+        refresh_context_stats_after_message(
+            runtime,
+            conversation_id=conversation["conversation_id"],
+            message=assistant_message,
         )
         return {
             "conversation_id": conversation["conversation_id"],
             "answer": ASK_EMPTY_MESSAGE,
             "sources": [],
             "answer_mode": "chunk",
+            "route_mode": plan["route"],
         }
 
     sources = build_sources(matches)
-    answer = await runtime.qwen.answer(query, matches, history)
-    runtime.db.append_chat_message(
+    answer = await runtime.qwen.answer(query, matches, effective_history, memory_text=effective_memory_text)
+    assistant_message = runtime.db.append_chat_message(
         conversation["conversation_id"],
         "assistant",
         answer,
         sources=sources,
         answer_mode="chunk",
+        route_mode=plan["route"],
+    )
+    refresh_context_stats_after_message(
+        runtime,
+        conversation_id=conversation["conversation_id"],
+        message=assistant_message,
     )
     return {
         "conversation_id": conversation["conversation_id"],
         "answer": answer,
         "sources": sources,
         "answer_mode": "chunk",
+        "route_mode": plan["route"],
     }
 
 
@@ -316,19 +519,78 @@ async def stream_answer_events(
         scope["folder_id"] if scope["scope"] == "folder" else None,
         conversation_id,
     )
-    history = load_chat_history(runtime, conversation["conversation_id"])
-    runtime.db.append_chat_message(conversation["conversation_id"], "user", query)
+    context = build_conversation_context(
+        runtime,
+        conversation_id=conversation["conversation_id"],
+    )
+    if should_compact_context(runtime, context):
+        yield sse_event("status", {"delta": "正在压缩上下文..."})
+        context = await compact_conversation_context(
+            runtime,
+            conversation_id=conversation["conversation_id"],
+            context=context,
+        )
+    user_message = runtime.db.append_chat_message(conversation["conversation_id"], "user", query)
+    refresh_context_stats_after_message(
+        runtime,
+        conversation_id=conversation["conversation_id"],
+        message=user_message,
+    )
     yield sse_event("conversation", {"conversation_id": conversation["conversation_id"]})
+    yield sse_event("status", {"delta": "正在理解问题..."})
+    plan = await resolve_query_plan(
+        runtime,
+        query=query,
+        folder_id=folder_id,
+        bvid=bvid,
+        scope_mode=scope_mode,
+        history=context.recent_history,
+        memory_text=context.memory_text,
+    )
+    effective_history = context.recent_history if plan["use_history"] else []
+    effective_memory_text = context.memory_text if plan["use_history"] else ""
+    yield sse_event("route", {"route_mode": plan["route"]})
 
-    routing = classify_query_intent(query, folder_id=folder_id, bvid=bvid, scope_mode=scope_mode)
-    if routing["intent"] != "detail_qa":
+    if plan["route"] == "history_only":
+        yield sse_event("status", {"delta": "正在回顾本次会话..."})
+        answer_fragments: list[str] = []
+        try:
+            async for delta in runtime.qwen.stream_answer_from_history(
+                query,
+                context.recent_history,
+                memory_text=context.memory_text,
+            ):
+                answer_fragments.append(delta)
+                yield sse_event("answer", {"delta": delta})
+            answer_text = "".join(answer_fragments).strip()
+            if answer_text:
+                assistant_message = runtime.db.append_chat_message(
+                    conversation["conversation_id"],
+                    "assistant",
+                    answer_text,
+                    sources=[],
+                    answer_mode=None,
+                    route_mode=plan["route"],
+                )
+                refresh_context_stats_after_message(
+                    runtime,
+                    conversation_id=conversation["conversation_id"],
+                    message=assistant_message,
+                )
+            yield sse_event("done")
+            return
+        except Exception as exc:
+            yield sse_event("error", {"detail": str(exc)})
+            return
+
+    if plan["retrieval_mode"] == "summary":
         yield sse_event("mode", {"mode": "summary"})
         yield sse_event("status", {"delta": "正在整理摘要..."})
         try:
             documents = await load_summary_documents(
                 runtime,
-                folder_id=folder_id if routing["scope"] == "folder" else None,
-                bvid=bvid if routing["scope"] == "video" else None,
+                folder_id=scope["folder_id"] if scope["scope"] == "folder" else None,
+                bvid=scope["bvid"] if scope["scope"] == "video" else None,
             )
         except Exception:
             documents = []
@@ -340,17 +602,28 @@ async def stream_answer_events(
             yield sse_event("status", {"delta": "已整理摘要，正在生成答案..."})
             answer_fragments: list[str] = []
             try:
-                async for delta in runtime.qwen.stream_answer_from_summary_documents(query, answer_documents, history):
+                async for delta in runtime.qwen.stream_answer_from_summary_documents(
+                    query,
+                    answer_documents,
+                    effective_history,
+                    memory_text=effective_memory_text,
+                ):
                     answer_fragments.append(delta)
                     yield sse_event("answer", {"delta": delta})
                 answer_text = "".join(answer_fragments).strip()
                 if answer_text:
-                    runtime.db.append_chat_message(
+                    assistant_message = runtime.db.append_chat_message(
                         conversation["conversation_id"],
                         "assistant",
                         answer_text,
                         sources=sources,
                         answer_mode="summary",
+                        route_mode=plan["route"],
+                    )
+                    refresh_context_stats_after_message(
+                        runtime,
+                        conversation_id=conversation["conversation_id"],
+                        message=assistant_message,
                     )
                 yield sse_event("done")
                 return
@@ -363,16 +636,22 @@ async def stream_answer_events(
     matches = await search_matches(
         runtime,
         query,
-        folder_id if routing["scope"] == "folder" else None,
-        bvid=bvid if routing["scope"] == "video" else None,
+        scope["folder_id"] if scope["scope"] == "folder" else None,
+        bvid=scope["bvid"] if scope["scope"] == "video" else None,
     )
     if not matches:
-        runtime.db.append_chat_message(
+        assistant_message = runtime.db.append_chat_message(
             conversation["conversation_id"],
             "assistant",
             STREAM_EMPTY_MESSAGE,
             sources=[],
             answer_mode="chunk",
+            route_mode=plan["route"],
+        )
+        refresh_context_stats_after_message(
+            runtime,
+            conversation_id=conversation["conversation_id"],
+            message=assistant_message,
         )
         yield sse_event("answer", {"delta": STREAM_EMPTY_MESSAGE})
         yield sse_event("sources", {"sources": []})
@@ -384,27 +663,44 @@ async def stream_answer_events(
     yield sse_event("status", {"delta": "已检索到资料，正在生成答案..."})
     answer_fragments: list[str] = []
     try:
-        async for delta in runtime.qwen.stream_answer(query, matches, history):
+        async for delta in runtime.qwen.stream_answer(
+            query,
+            matches,
+            effective_history,
+            memory_text=effective_memory_text,
+        ):
             answer_fragments.append(delta)
             yield sse_event("answer", {"delta": delta})
         answer_text = "".join(answer_fragments).strip()
         if answer_text:
-            runtime.db.append_chat_message(
+            assistant_message = runtime.db.append_chat_message(
                 conversation["conversation_id"],
                 "assistant",
                 answer_text,
                 sources=sources,
                 answer_mode="chunk",
+                route_mode=plan["route"],
+            )
+            refresh_context_stats_after_message(
+                runtime,
+                conversation_id=conversation["conversation_id"],
+                message=assistant_message,
             )
         yield sse_event("done")
     except Exception as exc:
         answer_text = "".join(answer_fragments).strip()
         if answer_text:
-            runtime.db.append_chat_message(
+            assistant_message = runtime.db.append_chat_message(
                 conversation["conversation_id"],
                 "assistant",
                 answer_text,
                 sources=sources,
                 answer_mode="chunk",
+                route_mode=plan["route"],
+            )
+            refresh_context_stats_after_message(
+                runtime,
+                conversation_id=conversation["conversation_id"],
+                message=assistant_message,
             )
         yield sse_event("error", {"detail": str(exc)})

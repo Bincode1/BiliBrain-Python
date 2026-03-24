@@ -167,8 +167,31 @@ class Database:
                 content LONGTEXT NOT NULL,
                 sources_json LONGTEXT NULL,
                 answer_mode VARCHAR(16) NULL,
+                route_mode VARCHAR(24) NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 INDEX idx_chat_messages_conversation (conversation_id, message_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS chat_conversation_memory (
+                conversation_id BIGINT PRIMARY KEY,
+                memory_text LONGTEXT NOT NULL,
+                compacted_until_message_id BIGINT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS chat_conversation_context_stats (
+                conversation_id BIGINT PRIMARY KEY,
+                last_message_id BIGINT NULL,
+                compacted_until_message_id BIGINT NULL,
+                recent_start_message_id BIGINT NULL,
+                memory_token_estimate INT NOT NULL DEFAULT 0,
+                uncompacted_token_estimate INT NOT NULL DEFAULT 0,
+                recent_token_estimate INT NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP
             )
             """,
         ]
@@ -220,6 +243,10 @@ class Database:
             (
                 "answer_mode",
                 "ALTER TABLE chat_messages ADD COLUMN answer_mode VARCHAR(16) NULL AFTER sources_json",
+            ),
+            (
+                "route_mode",
+                "ALTER TABLE chat_messages ADD COLUMN route_mode VARCHAR(24) NULL AFTER answer_mode",
             ),
         ]
         for column_name, statement in column_defs:
@@ -484,15 +511,202 @@ class Database:
                     (conversation_id,),
                 )
                 cursor.execute(
+                    "DELETE FROM chat_conversation_memory WHERE conversation_id = %s",
+                    (conversation_id,),
+                )
+                cursor.execute(
+                    "DELETE FROM chat_conversation_context_stats WHERE conversation_id = %s",
+                    (conversation_id,),
+                )
+                cursor.execute(
                     "DELETE FROM chat_conversations WHERE conversation_id = %s",
                     (conversation_id,),
                 )
         return True
 
+    def rename_chat_conversation(self, conversation_id: int, title: str) -> dict[str, Any] | None:
+        normalized_title = self._normalize_chat_title(title)
+        if not normalized_title:
+            raise RuntimeError("会话标题不能为空")
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE chat_conversations
+                    SET title = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE conversation_id = %s
+                    """,
+                    (normalized_title, conversation_id),
+                )
+                if int(cursor.rowcount or 0) <= 0:
+                    return None
+                cursor.execute(
+                    """
+                    SELECT
+                        c.conversation_id,
+                        c.scope_key,
+                        c.folder_id,
+                        c.title,
+                        c.created_at,
+                        c.updated_at,
+                        COUNT(m.message_id) AS message_count
+                    FROM chat_conversations c
+                    LEFT JOIN chat_messages m ON m.conversation_id = c.conversation_id
+                    WHERE c.conversation_id = %s
+                    GROUP BY c.conversation_id, c.scope_key, c.folder_id, c.title, c.created_at, c.updated_at
+                    """,
+                    (conversation_id,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            return None
+        return self._format_chat_conversation(row)
+
+    def get_chat_conversation_memory(self, conversation_id: int) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT conversation_id, memory_text, compacted_until_message_id, updated_at
+                    FROM chat_conversation_memory
+                    WHERE conversation_id = %s
+                    """,
+                    (conversation_id,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            return None
+        return self._format_chat_memory(row)
+
+    def upsert_chat_conversation_memory(
+        self,
+        conversation_id: int,
+        *,
+        memory_text: str,
+        compacted_until_message_id: int | None,
+    ) -> dict[str, Any]:
+        payload = str(memory_text or "").strip()
+        if not payload:
+            raise RuntimeError("会话记忆不能为空")
+        normalized_compacted_until = int(compacted_until_message_id) if compacted_until_message_id else None
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO chat_conversation_memory (conversation_id, memory_text, compacted_until_message_id)
+                    VALUES (%s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        memory_text = VALUES(memory_text),
+                        compacted_until_message_id = VALUES(compacted_until_message_id)
+                    """,
+                    (conversation_id, payload, normalized_compacted_until),
+                )
+                cursor.execute(
+                    """
+                    SELECT conversation_id, memory_text, compacted_until_message_id, updated_at
+                    FROM chat_conversation_memory
+                    WHERE conversation_id = %s
+                    """,
+                    (conversation_id,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            raise RuntimeError("保存会话记忆失败")
+        return self._format_chat_memory(row)
+
+    def get_chat_conversation_context_stats(self, conversation_id: int) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        conversation_id,
+                        last_message_id,
+                        compacted_until_message_id,
+                        recent_start_message_id,
+                        memory_token_estimate,
+                        uncompacted_token_estimate,
+                        recent_token_estimate,
+                        updated_at
+                    FROM chat_conversation_context_stats
+                    WHERE conversation_id = %s
+                    """,
+                    (conversation_id,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            return None
+        return self._format_chat_context_stats(row)
+
+    def upsert_chat_conversation_context_stats(
+        self,
+        conversation_id: int,
+        *,
+        last_message_id: int | None,
+        compacted_until_message_id: int | None,
+        recent_start_message_id: int | None,
+        memory_token_estimate: int,
+        uncompacted_token_estimate: int,
+        recent_token_estimate: int,
+    ) -> dict[str, Any]:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO chat_conversation_context_stats (
+                        conversation_id,
+                        last_message_id,
+                        compacted_until_message_id,
+                        recent_start_message_id,
+                        memory_token_estimate,
+                        uncompacted_token_estimate,
+                        recent_token_estimate
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        last_message_id = VALUES(last_message_id),
+                        compacted_until_message_id = VALUES(compacted_until_message_id),
+                        recent_start_message_id = VALUES(recent_start_message_id),
+                        memory_token_estimate = VALUES(memory_token_estimate),
+                        uncompacted_token_estimate = VALUES(uncompacted_token_estimate),
+                        recent_token_estimate = VALUES(recent_token_estimate)
+                    """,
+                    (
+                        conversation_id,
+                        int(last_message_id) if last_message_id else None,
+                        int(compacted_until_message_id) if compacted_until_message_id else None,
+                        int(recent_start_message_id) if recent_start_message_id else None,
+                        max(int(memory_token_estimate), 0),
+                        max(int(uncompacted_token_estimate), 0),
+                        max(int(recent_token_estimate), 0),
+                    ),
+                )
+                cursor.execute(
+                    """
+                    SELECT
+                        conversation_id,
+                        last_message_id,
+                        compacted_until_message_id,
+                        recent_start_message_id,
+                        memory_token_estimate,
+                        uncompacted_token_estimate,
+                        recent_token_estimate,
+                        updated_at
+                    FROM chat_conversation_context_stats
+                    WHERE conversation_id = %s
+                    """,
+                    (conversation_id,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            raise RuntimeError("保存会话上下文统计失败")
+        return self._format_chat_context_stats(row)
+
     def list_chat_messages(self, conversation_id: int, *, limit: int | None = None) -> list[dict[str, Any]]:
         query = [
             """
-            SELECT message_id, conversation_id, role, content, sources_json, answer_mode, created_at
+            SELECT message_id, conversation_id, role, content, sources_json, answer_mode, route_mode, created_at
             FROM chat_messages
             WHERE conversation_id = %s
             ORDER BY message_id ASC
@@ -509,6 +723,63 @@ class Database:
                 rows = list(cursor.fetchall())
         return [self._format_chat_message(row) for row in rows]
 
+    def list_recent_chat_messages_by_turns(self, conversation_id: int, *, keep_turns: int) -> list[dict[str, Any]]:
+        safe_turns = max(int(keep_turns), 1)
+        query_limit = max(safe_turns * 8, 40)
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT message_id, conversation_id, role, content, sources_json, answer_mode, route_mode, created_at
+                    FROM chat_messages
+                    WHERE conversation_id = %s
+                    ORDER BY message_id DESC
+                    LIMIT %s
+                    """,
+                    (conversation_id, query_limit),
+                )
+                rows = list(cursor.fetchall())
+        descending = [self._format_chat_message(row) for row in rows]
+        if not descending:
+            return []
+        recent_reversed: list[dict[str, Any]] = []
+        user_turns = 0
+        for item in descending:
+            recent_reversed.append(item)
+            if str(item.get("role") or "").strip().lower() == "user":
+                user_turns += 1
+                if user_turns >= safe_turns:
+                    break
+        return list(reversed(recent_reversed))
+
+    def list_chat_messages_between(
+        self,
+        conversation_id: int,
+        *,
+        start_message_id: int | None = None,
+        end_message_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        query = [
+            """
+            SELECT message_id, conversation_id, role, content, sources_json, answer_mode, route_mode, created_at
+            FROM chat_messages
+            WHERE conversation_id = %s
+            """
+        ]
+        params: list[Any] = [conversation_id]
+        if start_message_id is not None:
+            query.append("AND message_id > %s")
+            params.append(int(start_message_id))
+        if end_message_id is not None:
+            query.append("AND message_id < %s")
+            params.append(int(end_message_id))
+        query.append("ORDER BY message_id ASC")
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("\n".join(query), tuple(params))
+                rows = list(cursor.fetchall())
+        return [self._format_chat_message(row) for row in rows]
+
     def append_chat_message(
         self,
         conversation_id: int,
@@ -517,6 +788,7 @@ class Database:
         *,
         sources: list[dict[str, Any]] | None = None,
         answer_mode: str | None = None,
+        route_mode: str | None = None,
     ) -> dict[str, Any]:
         normalized_role = str(role or "").strip().lower()
         if normalized_role not in {"user", "assistant"}:
@@ -530,15 +802,19 @@ class Database:
         if normalized_answer_mode not in {None, "summary", "chunk"}:
             raise RuntimeError("不支持的回答模式")
 
+        normalized_route_mode = str(route_mode or "").strip().lower() or None
+        if normalized_route_mode not in {None, "history_only", "summary_only", "chunk_only", "mixed"}:
+            raise RuntimeError("不支持的路由模式")
+
         sources_json = json.dumps(sources or [], ensure_ascii=False) if sources is not None else None
         with self.connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
-                    INSERT INTO chat_messages (conversation_id, role, content, sources_json, answer_mode)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO chat_messages (conversation_id, role, content, sources_json, answer_mode, route_mode)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     """,
-                    (conversation_id, normalized_role, payload, sources_json, normalized_answer_mode),
+                    (conversation_id, normalized_role, payload, sources_json, normalized_answer_mode, normalized_route_mode),
                 )
                 message_id = int(cursor.lastrowid)
                 cursor.execute(
@@ -555,7 +831,7 @@ class Database:
                 )
                 cursor.execute(
                     """
-                    SELECT message_id, conversation_id, role, content, sources_json, answer_mode, created_at
+                    SELECT message_id, conversation_id, role, content, sources_json, answer_mode, route_mode, created_at
                     FROM chat_messages
                     WHERE message_id = %s
                     """,
@@ -1212,6 +1488,27 @@ class Database:
             "role": row["role"],
             "content": row.get("content") or "",
             "answer_mode": str(row.get("answer_mode") or "").strip().lower() or None,
+            "route_mode": str(row.get("route_mode") or "").strip().lower() or None,
             "sources": sources if isinstance(sources, list) else [],
             "created_at": _format_datetime(row.get("created_at")),
+        }
+
+    def _format_chat_memory(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "conversation_id": int(row["conversation_id"]),
+            "memory_text": str(row.get("memory_text") or "").strip(),
+            "compacted_until_message_id": int(row["compacted_until_message_id"]) if row.get("compacted_until_message_id") else None,
+            "updated_at": _format_datetime(row.get("updated_at")),
+        }
+
+    def _format_chat_context_stats(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "conversation_id": int(row["conversation_id"]),
+            "last_message_id": int(row["last_message_id"]) if row.get("last_message_id") else None,
+            "compacted_until_message_id": int(row["compacted_until_message_id"]) if row.get("compacted_until_message_id") else None,
+            "recent_start_message_id": int(row["recent_start_message_id"]) if row.get("recent_start_message_id") else None,
+            "memory_token_estimate": int(row.get("memory_token_estimate") or 0),
+            "uncompacted_token_estimate": int(row.get("uncompacted_token_estimate") or 0),
+            "recent_token_estimate": int(row.get("recent_token_estimate") or 0),
+            "updated_at": _format_datetime(row.get("updated_at")),
         }

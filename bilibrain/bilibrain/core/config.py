@@ -48,6 +48,7 @@ class Settings:
     dashscope_api_key: str
     dashscope_base_url: str
     llm_model: str
+    planner_llm_model: str
     asr_model: str
     asr_language: str
     asr_chunk_seconds: int
@@ -78,6 +79,8 @@ class Settings:
     subtitle_chunk_overlap_chars: int
     subtitle_chunk_max_tokens: int
     default_max_video_minutes: int
+    chat_recent_turns_to_keep: int
+    chat_compaction_trigger_tokens: int
     audio_cache_dir: Path
     frontend_dist_dir: Path
     index_file: Path
@@ -105,6 +108,7 @@ def get_settings() -> Settings:
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
         ).rstrip("/"),
         llm_model=os.getenv("LLM_MODEL", "qwen-plus"),
+        planner_llm_model=os.getenv("PLANNER_LLM_MODEL", os.getenv("LLM_MODEL", "qwen-plus")).strip(),
         asr_model=os.getenv("ASR_MODEL", "qwen3-asr-flash"),
         asr_language=os.getenv("ASR_LANGUAGE", "zh").strip(),
         asr_chunk_seconds=_int("ASR_CHUNK_SECONDS", 120),
@@ -135,6 +139,8 @@ def get_settings() -> Settings:
         subtitle_chunk_overlap_chars=_int("SUBTITLE_CHUNK_OVERLAP_CHARS", 50),
         subtitle_chunk_max_tokens=_int("SUBTITLE_CHUNK_MAX_TOKENS", 600),
         default_max_video_minutes=_int("DEFAULT_MAX_VIDEO_MINUTES", 30),
+        chat_recent_turns_to_keep=_int("CHAT_RECENT_TURNS_TO_KEEP", 5),
+        chat_compaction_trigger_tokens=_int("CHAT_COMPACTION_TRIGGER_TOKENS", 50000),
         audio_cache_dir=BASE_DIR / "data" / "audio",
         frontend_dist_dir=WORKSPACE_DIR / "frontend" / "dist",
         index_file=(
