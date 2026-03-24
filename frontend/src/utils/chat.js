@@ -10,25 +10,74 @@ function escapeHtml(value) {
 
 export function renderMarkdown(text, sources = []) {
   if (!text) return "";
-  const html = marked.parse(text);
+  let markdownText = String(text);
   if (!Array.isArray(sources) || !sources.length) {
-    return html;
+    return marked.parse(markdownText);
   }
   const sourceMap = new Map(
     sources
       .map((source) => [Number(source.ref_index), source])
       .filter(([index]) => Number.isFinite(index) && index > 0)
   );
-  return html.replace(/【(\d+)】/g, (_, rawIndex) => {
+
+  function renderCitationAnchor(rawIndex) {
     const index = Number(rawIndex);
     const source = sourceMap.get(index);
     if (!source?.jump_url) {
-      return `【${rawIndex}】`;
+      return null;
     }
     const label = `资料 ${index}`;
     const title = `${source.video_title || "视频片段"} ${source.timestamp ? `· ${source.timestamp}` : ""}`;
     return `<a class="inline-citation" href="${escapeHtml(source.jump_url)}" target="_blank" rel="noreferrer" title="${escapeHtml(title)}">${escapeHtml(label)}</a>`;
+  }
+
+  function renderCitationGroup(indices) {
+    const anchors = indices
+      .map((index) => renderCitationAnchor(index))
+      .filter(Boolean);
+    return anchors.length ? anchors.join(" ") : null;
+  }
+
+  const placeholders = new Map();
+  let placeholderIndex = 0;
+
+  function injectPlaceholder(rendered, fallback) {
+    if (!rendered) {
+      return fallback;
+    }
+    const token = `@@BILIBRAIN_CITATION_${placeholderIndex}@@`;
+    placeholderIndex += 1;
+    placeholders.set(token, rendered);
+    return token;
+  }
+
+  markdownText = markdownText.replace(/（\s*资料\s*((?:\[\d+\]\s*(?:[、，,]\s*\[\d+\]\s*)*))）/g, (match, rawGroup) => {
+    const indices = String(rawGroup || "").match(/\d+/g) || [];
+    return injectPlaceholder(renderCitationGroup(indices), match);
   });
+
+  markdownText = markdownText.replace(/\(\s*资料\s*((?:\[\d+\]\s*(?:[、，,]\s*\[\d+\]\s*)*))\)/g, (match, rawGroup) => {
+    const indices = String(rawGroup || "").match(/\d+/g) || [];
+    return injectPlaceholder(renderCitationGroup(indices), match);
+  });
+
+  markdownText = markdownText.replace(/【(\d+)】/g, (_, rawIndex) => {
+    return injectPlaceholder(renderCitationAnchor(rawIndex), `【${rawIndex}】`);
+  });
+
+  markdownText = markdownText.replace(/资料\s*\[(\d+)\]/g, (match, rawIndex) => {
+    return injectPlaceholder(renderCitationAnchor(rawIndex), match);
+  });
+
+  markdownText = markdownText.replace(/资料\s*(\d+)/g, (match, rawIndex) => {
+    return injectPlaceholder(renderCitationAnchor(rawIndex), match);
+  });
+
+  let html = marked.parse(markdownText);
+  for (const [token, rendered] of placeholders.entries()) {
+    html = html.replaceAll(token, rendered);
+  }
+  return html;
 }
 
 export function normalizeChatMessage(message, fallbackConversationId = null) {
@@ -38,6 +87,7 @@ export function normalizeChatMessage(message, fallbackConversationId = null) {
     role: message.role === "assistant" ? "assistant" : "user",
     text: message.text ?? message.content ?? "",
     answer_mode: message.answer_mode || null,
+    route_mode: message.route_mode || null,
     sources: Array.isArray(message.sources)
       ? message.sources.map((source, index) => ({
           ...source,
@@ -60,6 +110,22 @@ export function messageModeLabel(message) {
   }
   if (message.answer_mode === "chunk") {
     return "检索回答";
+  }
+  return "";
+}
+
+export function messageRouteLabel(message) {
+  if (message.route_mode === "history_only") {
+    return "会话回顾";
+  }
+  if (message.route_mode === "summary_only") {
+    return "总结路由";
+  }
+  if (message.route_mode === "chunk_only") {
+    return "检索路由";
+  }
+  if (message.route_mode === "mixed") {
+    return "混合路由";
   }
   return "";
 }

@@ -8,6 +8,13 @@
         <div class="message-head">
           <div class="message-role">{{ message.role === "user" ? "你" : "BiliBrain" }}</div>
           <span
+            v-if="message.role === 'assistant' && message.route_mode"
+            class="message-mode-badge route-badge"
+            :class="message.route_mode"
+          >
+            {{ messageRouteLabel(message) }}
+          </span>
+          <span
             v-if="message.role === 'assistant' && message.answer_mode"
             class="message-mode-badge"
             :class="message.answer_mode"
@@ -75,6 +82,7 @@ import { storeToRefs } from "pinia";
 import { useWorkspaceStore } from "@/stores/workspace";
 import {
   messageModeLabel,
+  messageRouteLabel,
   messageSourceLabel,
   renderMarkdown,
   sourceMetaLabel,

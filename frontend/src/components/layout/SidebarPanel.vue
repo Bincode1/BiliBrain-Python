@@ -42,8 +42,18 @@
     <section class="folders-section">
       <div class="folders-header">收藏夹</div>
       <div v-if="folders.length" class="folder-list folder-scroll">
-        <article v-for="folder in folders" :key="folder.folder_id" class="folder-card">
-          <button class="folder-toggle" type="button" @click="store.openFolder(folder)">
+        <article
+          v-for="folder in folders"
+          :key="folder.folder_id"
+          class="folder-card"
+          :class="{ active: selectedFolderId === String(folder.folder_id) }"
+        >
+          <button
+            class="folder-toggle"
+            :class="{ active: selectedFolderId === String(folder.folder_id) }"
+            type="button"
+            @click="store.openFolder(folder)"
+          >
             <span>
               <strong>{{ folder.title }}</strong>
               <em>{{ folder.media_count }} 个视频 · 已入库 {{ folder.synced_videos || 0 }}</em>
@@ -62,7 +72,15 @@
               v-for="video in folder.videos"
               :key="video.bvid"
               class="video-list-item"
-              :class="[{ active: selectedVideoBvid === video.bvid && !video.is_invalid }, videoTone(video)]"
+              :class="[
+                {
+                  active:
+                    selectedFolderId === String(folder.folder_id) &&
+                    selectedVideoBvid === video.bvid &&
+                    !video.is_invalid,
+                },
+                videoTone(video),
+              ]"
               type="button"
               :disabled="video.is_invalid"
               @click="store.selectVideo(folder, video)"
@@ -130,5 +148,5 @@ import { useWorkspaceStore } from "@/stores/workspace";
 import { formatDuration, openVideoLink, videoTone } from "@/utils/video";
 
 const store = useWorkspaceStore();
-const { folders, processingSettings, selectedVideoBvid, session, settingsStatus, syncStatus } = storeToRefs(store);
+const { folders, processingSettings, selectedFolderId, selectedVideoBvid, session, settingsStatus, syncStatus } = storeToRefs(store);
 </script>

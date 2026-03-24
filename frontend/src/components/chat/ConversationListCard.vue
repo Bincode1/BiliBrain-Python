@@ -22,19 +22,43 @@
             :disabled="chatConversationsLoading && Number(activeConversationId) === Number(conversation.conversation_id)"
             type="button"
             :title="conversationLabel(conversation, index)"
-            @click="store.selectConversation(conversation.conversation_id)"
+            @click="handleSelect(conversation.conversation_id)"
           >
             <span class="conversation-title">{{ conversationShortLabel(conversation, index) }}</span>
           </button>
           <button
-            class="conversation-delete"
+            class="conversation-actions-trigger"
             type="button"
-            :disabled="Number(deletingConversationId) === Number(conversation.conversation_id)"
-            title="删除会话"
-            @click="store.deleteConversation(conversation.conversation_id)"
+            :disabled="
+              Number(deletingConversationId) === Number(conversation.conversation_id) ||
+              Number(renamingConversationId) === Number(conversation.conversation_id)
+            "
+            title="更多操作"
+            @click.stop="toggleMenu(conversation.conversation_id)"
           >
-            ×
+            ⋯
           </button>
+          <div
+            v-if="Number(openMenuId) === Number(conversation.conversation_id)"
+            class="conversation-actions-menu"
+          >
+            <button
+              class="conversation-actions-item"
+              type="button"
+              :disabled="Number(renamingConversationId) === Number(conversation.conversation_id)"
+              @click="handleRename(conversation.conversation_id)"
+            >
+              重命名
+            </button>
+            <button
+              class="conversation-actions-item danger"
+              type="button"
+              :disabled="Number(deletingConversationId) === Number(conversation.conversation_id)"
+              @click="handleDelete(conversation.conversation_id)"
+            >
+              删除
+            </button>
+          </div>
         </article>
       </div>
     </div>
@@ -42,11 +66,53 @@
 </template>
 
 <script setup>
+import { onBeforeUnmount, onMounted, ref } from "vue";
 import { storeToRefs } from "pinia";
 
 import { useWorkspaceStore } from "@/stores/workspace";
 import { conversationLabel, conversationShortLabel } from "@/utils/chat";
 
 const store = useWorkspaceStore();
-const { activeConversationId, chatConversations, chatConversationsLoading, deletingConversationId } = storeToRefs(store);
+const openMenuId = ref(null);
+const { activeConversationId, chatConversations, chatConversationsLoading, deletingConversationId, renamingConversationId } =
+  storeToRefs(store);
+
+function toggleMenu(conversationId) {
+  openMenuId.value = Number(openMenuId.value) === Number(conversationId) ? null : Number(conversationId);
+}
+
+async function handleRename(conversationId) {
+  openMenuId.value = null;
+  await store.renameConversation(conversationId);
+}
+
+async function handleDelete(conversationId) {
+  openMenuId.value = null;
+  await store.deleteConversation(conversationId);
+}
+
+async function handleSelect(conversationId) {
+  openMenuId.value = null;
+  await store.selectConversation(conversationId);
+}
+
+function handleDocumentClick(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) {
+    openMenuId.value = null;
+    return;
+  }
+  if (target.closest(".conversation-popover-item")) {
+    return;
+  }
+  openMenuId.value = null;
+}
+
+onMounted(() => {
+  document.addEventListener("click", handleDocumentClick);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener("click", handleDocumentClick);
+});
 </script>

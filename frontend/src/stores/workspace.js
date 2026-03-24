@@ -38,6 +38,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   const chatHistoryLoading = ref(false);
   const chatConversationsLoading = ref(false);
   const deletingConversationId = ref(null);
+  const renamingConversationId = ref(null);
   const processingSettings = reactive({
     max_video_minutes: 30,
     saving: false,
@@ -51,6 +52,15 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   const documentViewerMode = ref("summary");
   const documentViewerVideoBvid = ref("");
   const documentViewerTitle = ref("");
+  const dialogOpen = ref(false);
+  const dialogMode = ref("confirm");
+  const dialogTitle = ref("");
+  const dialogMessage = ref("");
+  const dialogInput = ref("");
+  const dialogPlaceholder = ref("");
+  const dialogConfirmLabel = ref("确定");
+  const dialogCancelLabel = ref("取消");
+  const dialogTone = ref("default");
   const documentViewerPanes = reactive({
     summary: { loading: false, text: "", meta: "", error: "", loadedBvid: "" },
     transcript: { loading: false, text: "", meta: "", error: "", loadedBvid: "" },
@@ -59,6 +69,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   let qrPollTimer = null;
   const processPollers = new Map();
   let chatStreamEl = null;
+  let dialogResolver = null;
 
   const selectedFolder = computed(() => folders.value.find((folder) => String(folder.folder_id) === String(selectedFolderId.value)) || null);
   const selectedVideo = computed(() => selectedFolder.value?.videos.find((video) => video.bvid === selectedVideoBvid.value) || null);
@@ -138,6 +149,38 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     documentViewerOpen.value = false;
   }
 
+  function openDialog(options = {}) {
+    dialogMode.value = options.mode || "confirm";
+    dialogTitle.value = options.title || "";
+    dialogMessage.value = options.message || "";
+    dialogInput.value = options.initialValue || "";
+    dialogPlaceholder.value = options.placeholder || "";
+    dialogConfirmLabel.value = options.confirmLabel || "确定";
+    dialogCancelLabel.value = options.cancelLabel || "取消";
+    dialogTone.value = options.tone || "default";
+    dialogOpen.value = true;
+    return new Promise((resolve) => {
+      dialogResolver = resolve;
+    });
+  }
+
+  function closeDialog(result = null) {
+    dialogOpen.value = false;
+    const resolver = dialogResolver;
+    dialogResolver = null;
+    if (resolver) {
+      resolver(result);
+    }
+  }
+
+  function confirmDialog(options = {}) {
+    return openDialog({ ...options, mode: "confirm" });
+  }
+
+  function promptDialog(options = {}) {
+    return openDialog({ ...options, mode: "prompt" });
+  }
+
   function closeQrModal() {
     qrModalOpen.value = false;
     qrSvg.value = "";
@@ -194,7 +237,14 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   }
 
   async function resetAllProcessedContent() {
-    if (!window.confirm("这会清空所有已转写、已入库和音频缓存内容，但会保留收藏夹和视频元数据。确定继续吗？")) {
+    const confirmed = await confirmDialog({
+      title: "重置全部已处理内容",
+      message: "这会清空所有已转写、已入库和音频缓存内容，但会保留收藏夹和视频元数据。",
+      confirmLabel: "确认重置",
+      cancelLabel: "取消",
+      tone: "danger",
+    });
+    if (!confirmed) {
       return;
     }
 
@@ -440,7 +490,14 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     }
     const conversation = chatConversations.value.find((item) => Number(item.conversation_id) === Number(conversationId));
     const label = conversation?.title || "这个会话";
-    if (!window.confirm(`确定删除“${label}”吗？聊天记录会一起删除。`)) {
+    const confirmed = await confirmDialog({
+      title: "删除会话",
+      message: `确定删除“${label}”吗？聊天记录会一起删除。`,
+      confirmLabel: "删除",
+      cancelLabel: "取消",
+      tone: "danger",
+    });
+    if (!confirmed) {
       return;
     }
 
@@ -463,6 +520,49 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       setStatus(chatStatus, error.message, true);
     } finally {
       deletingConversationId.value = null;
+    }
+  }
+
+  async function renameConversation(conversationId) {
+    if (!conversationId) {
+      return;
+    }
+    const conversation = chatConversations.value.find((item) => Number(item.conversation_id) === Number(conversationId));
+    const currentTitle = String(conversation?.title || "").trim();
+    const nextTitle = await promptDialog({
+      title: "重命名会话",
+      message: "给这条会话换一个更清晰的名字。",
+      initialValue: currentTitle || "",
+      placeholder: "请输入新的会话名称",
+      confirmLabel: "保存",
+      cancelLabel: "取消",
+    });
+    if (nextTitle == null) {
+      return;
+    }
+    const normalizedTitle = nextTitle.trim();
+    if (!normalizedTitle) {
+      setStatus(chatStatus, "会话名称不能为空。", true);
+      return;
+    }
+    try {
+      renamingConversationId.value = Number(conversationId);
+      clearStatus(chatStatus);
+      const data = await api(`/api/chat/conversations/${encodeURIComponent(conversationId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title: normalizedTitle }),
+      });
+      chatConversations.value = Array.isArray(data.conversations)
+        ? data.conversations.map(normalizeConversation)
+        : chatConversations.value.map((item) =>
+            Number(item.conversation_id) === Number(conversationId)
+              ? { ...item, title: normalizedTitle }
+              : item
+          );
+    } catch (error) {
+      setStatus(chatStatus, error.message, true);
+    } finally {
+      renamingConversationId.value = null;
     }
   }
 
@@ -729,7 +829,9 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       scopeFolderId = Number(selectedChatFolder.value.folder_id);
     }
 
-    const assistantMessage = reactive(normalizeChatMessage({ role: "assistant", text: "", sources: [] }, activeConversationId.value));
+    const assistantMessage = reactive(
+      normalizeChatMessage({ role: "assistant", text: "正在理解问题...", sources: [] }, activeConversationId.value)
+    );
     chatMessages.value.push(normalizeChatMessage({ role: "user", text: query }, activeConversationId.value));
     chatMessages.value.push(assistantMessage);
     chatInput.value = "";
@@ -774,6 +876,8 @@ export const useWorkspaceStore = defineStore("workspace", () => {
           const { event, data } = parseSseEvent(frame);
           if (event === "conversation") {
             activeConversationId.value = data.conversation_id || null;
+          } else if (event === "route") {
+            assistantMessage.route_mode = data.route_mode || null;
           } else if (event === "mode") {
             assistantMessage.answer_mode = data.mode || null;
           } else if (event === "status") {
@@ -823,6 +927,10 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       qrPollTimer = null;
     }
     stopAllPollers();
+    if (dialogResolver) {
+      dialogResolver(null);
+      dialogResolver = null;
+    }
   }
 
   watch(chatScopeMode, () => {
@@ -849,12 +957,22 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     chatHistoryLoading,
     chatConversationsLoading,
     deletingConversationId,
+    renamingConversationId,
     processingSettings,
     session,
     documentViewerOpen,
     documentViewerMode,
     documentViewerVideoBvid,
     documentViewerTitle,
+    dialogOpen,
+    dialogMode,
+    dialogTitle,
+    dialogMessage,
+    dialogInput,
+    dialogPlaceholder,
+    dialogConfirmLabel,
+    dialogCancelLabel,
+    dialogTone,
     documentViewerPanes,
     selectedFolder,
     selectedVideo,
@@ -866,6 +984,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     toggleMessageSources,
     closeQrModal,
     closeDocumentViewer,
+    closeDialog,
     loadSettings,
     saveSettings,
     resetAllProcessedContent,
@@ -877,6 +996,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     createConversation,
     selectConversation,
     deleteConversation,
+    renameConversation,
     syncFolder,
     openFolder,
     selectVideo,
