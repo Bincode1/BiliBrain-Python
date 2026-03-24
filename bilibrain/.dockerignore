@@ -1,0 +1,15 @@
+.git
+.idea
+.pytest_cache
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+docs
+tests
+task_plan.md
+findings.md
+progress.md
+frontend/node_modules
+frontend/dist
