@@ -324,7 +324,12 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     }
   }
 
-  async function loadChatHistory() {
+  async function loadChatHistory(options = {}) {
+    const {
+      showLoading = true,
+      scrollToBottomOnLoad = true,
+    } = options;
+
     if (!session.loggedIn) {
       activeConversationId.value = null;
       chatConversations.value = [];
@@ -332,7 +337,9 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       return;
     }
 
-    chatHistoryLoading.value = true;
+    if (showLoading) {
+      chatHistoryLoading.value = true;
+    }
     try {
       const params = new URLSearchParams();
       if (activeConversationId.value) {
@@ -344,17 +351,28 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       chatMessages.value = Array.isArray(data.messages)
         ? data.messages.map((message) => normalizeChatMessage(message, activeConversationId.value))
         : [];
-      scrollChatToBottom();
     } catch (error) {
       activeConversationId.value = null;
       chatMessages.value = [];
       setStatus(chatStatus, error.message, true);
     } finally {
-      chatHistoryLoading.value = false;
+      if (showLoading) {
+        chatHistoryLoading.value = false;
+      }
+    }
+
+    if (scrollToBottomOnLoad) {
+      await nextTick();
+      scrollChatToBottom();
     }
   }
 
-  async function loadChatConversations(preferredConversationId = null) {
+  async function loadChatConversations(preferredConversationId = null, options = {}) {
+    const {
+      historyShowLoading = true,
+      historyScrollToBottomOnLoad = true,
+    } = options;
+
     if (!session.loggedIn) {
       activeConversationId.value = null;
       chatConversations.value = [];
@@ -372,7 +390,10 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       const preferredId = preferredConversationId ?? activeConversationId.value ?? data.active_conversation_id ?? null;
       const exists = chatConversations.value.some((item) => Number(item.conversation_id) === Number(preferredId));
       activeConversationId.value = exists ? Number(preferredId) : (chatConversations.value[0]?.conversation_id || null);
-      await loadChatHistory();
+      await loadChatHistory({
+        showLoading: historyShowLoading,
+        scrollToBottomOnLoad: historyScrollToBottomOnLoad,
+      });
     } catch (error) {
       activeConversationId.value = null;
       chatConversations.value = [];
@@ -774,7 +795,10 @@ export const useWorkspaceStore = defineStore("workspace", () => {
           }
         }
       }
-      await loadChatConversations(activeConversationId.value);
+      await loadChatConversations(activeConversationId.value, {
+        historyShowLoading: false,
+        historyScrollToBottomOnLoad: true,
+      });
     } catch (error) {
       assistantMessage.text = error.message;
       assistantMessage.answer_mode = assistantMessage.answer_mode || "chunk";
