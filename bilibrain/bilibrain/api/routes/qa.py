@@ -22,19 +22,15 @@ router = APIRouter()
 
 @router.get("/api/chat/history")
 async def chat_history(
-    folder_id: int | None = Query(default=None, gt=0),
     conversation_id: int | None = Query(default=None, gt=0),
     runtime: Runtime = Depends(get_runtime),
 ) -> dict[str, object]:
-    return await get_chat_history(runtime, folder_id, conversation_id)
+    return await get_chat_history(runtime, conversation_id)
 
 
 @router.get("/api/chat/conversations")
-async def chat_conversations(
-    folder_id: int | None = Query(default=None, gt=0),
-    runtime: Runtime = Depends(get_runtime),
-) -> dict[str, object]:
-    return await list_chat_conversations(runtime, folder_id)
+async def chat_conversations(runtime: Runtime = Depends(get_runtime)) -> dict[str, object]:
+    return await list_chat_conversations(runtime)
 
 
 @router.post("/api/chat/conversations")
@@ -42,7 +38,7 @@ async def chat_conversations_create(
     payload: ChatConversationCreateRequest,
     runtime: Runtime = Depends(get_runtime),
 ) -> dict[str, object]:
-    return await create_chat_conversation(runtime, payload.folder_id, payload.title)
+    return await create_chat_conversation(runtime, payload.title)
 
 
 @router.delete("/api/chat/conversations/{conversation_id}")
@@ -71,6 +67,7 @@ async def ask(payload: AskRequest, runtime: Runtime = Depends(get_runtime)) -> d
         payload.bvid,
         payload.scope_mode,
         payload.conversation_id,
+        payload.deep_research,
     )
 
 
@@ -84,6 +81,7 @@ async def ask_stream(payload: AskRequest, runtime: Runtime = Depends(get_runtime
             payload.bvid,
             payload.scope_mode,
             payload.conversation_id,
+            payload.deep_research,
         ),
         media_type="text/event-stream",
         headers={

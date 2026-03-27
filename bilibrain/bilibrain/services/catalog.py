@@ -17,7 +17,6 @@ VIDEO_FIELDS = [
     "cover_url",
     "cid",
     "manual_tags",
-    "subtitle_source",
     "transcript_source",
     "transcript_segment_count",
     "transcript_updated_at",
@@ -51,21 +50,8 @@ def _schedule_cache_task(
     if existing and not existing.done():
         return
 
-    async def runner() -> None:
-        try:
-            await operation_factory()
-        except Exception:
-            return
-
-    task = asyncio.create_task(runner())
-    runtime.cache_tasks[task_key] = task
-
-    def cleanup(completed: asyncio.Task[Any]) -> None:
-        current = runtime.cache_tasks.get(task_key)
-        if current is completed:
-            runtime.cache_tasks.pop(task_key, None)
-
-    task.add_done_callback(cleanup)
+    task = asyncio.create_task(operation_factory())
+    runtime.track_cache_task(task_key, task)
 
 
 def folder_list_cache_key(uid: int) -> str:
@@ -152,6 +138,37 @@ async def build_folder_videos_payload(runtime: Runtime, folder_id: int) -> dict[
         "videos": videos,
         "cached": has_cache,
         "stale": has_cache and not is_fresh,
+    }
+
+
+async def search_bilibili_videos_for_folder(
+    runtime: Runtime,
+    folder_id: int,
+    *,
+    keyword: str | None = None,
+    page: int = 1,
+    page_size: int = 12,
+) -> dict[str, Any]:
+    folder = runtime.db.get_folder(folder_id)
+    if not folder:
+        raise RuntimeError("找不到这个收藏夹，请先读取收藏夹列表。")
+
+    resolved_keyword = " ".join(str(keyword or folder["title"] or "").split()).strip()
+    if not resolved_keyword:
+        raise RuntimeError("这个收藏夹缺少可用标题，请手动输入搜索词。")
+
+    result = await runtime.bili.search_videos(
+        resolved_keyword,
+        page=page,
+        page_size=page_size,
+    )
+    return {
+        "folder": {
+            "folder_id": folder["folder_id"],
+            "title": folder["title"],
+            "media_count": folder["media_count"],
+        },
+        **result,
     }
 
 

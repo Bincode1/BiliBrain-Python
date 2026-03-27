@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 from typing import TYPE_CHECKING, Any
 
-from bilibrain.services.common import build_jump_url, merge_subtitle_segments, seconds_to_timestamp
+from bilibrain.services.common import build_segment_inputs
+from bilibrain.services.common import build_jump_url, seconds_to_timestamp
 
 if TYPE_CHECKING:
     from bilibrain.core.runtime import Runtime
@@ -15,7 +16,7 @@ SUMMARY_GROUP_MAX_DOCS = 8
 SUMMARY_GROUP_MAX_CHARS = 12000
 SUMMARY_AUTOGEN_FOLDER_LIMIT = 6
 
-SUMMARY_KEYWORDS = (
+SUMMARY_KEYWORDS = frozenset({
     "总结",
     "概括",
     "归纳",
@@ -26,23 +27,23 @@ SUMMARY_KEYWORDS = (
     "讲了什么",
     "说了什么",
     "主要讲",
-)
-FOLDER_SCOPE_KEYWORDS = (
+})
+FOLDER_SCOPE_KEYWORDS = frozenset({
     "收藏夹",
     "这些视频",
     "文件夹",
     "这一组",
     "这组视频",
     "这一批视频",
-)
-VIDEO_SCOPE_KEYWORDS = (
+})
+VIDEO_SCOPE_KEYWORDS = frozenset({
     "这个视频",
     "这条视频",
     "这期视频",
     "本视频",
     "当前视频",
     "这期",
-)
+})
 
 
 def normalize_scope_mode(scope_mode: str | None) -> str | None:
@@ -99,26 +100,6 @@ def classify_query_intent(
     if scope["scope"] == "folder":
         return {"intent": "folder_summary", "scope": "folder"}
     return {"intent": "folder_summary", "scope": "global"}
-
-
-def build_segment_inputs(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for segment in segments:
-        start_seconds = float(segment.get("start_seconds", segment.get("from", 0)) or 0)
-        end_seconds = float(segment.get("end_seconds", segment.get("to", start_seconds)) or start_seconds)
-        content = str(segment.get("content") or "").strip()
-        if not content:
-            continue
-        items.append(
-            {
-                "from": start_seconds,
-                "to": end_seconds,
-                "content": content,
-            }
-        )
-    return items
-
-
 def compute_transcript_hash(transcript_text: str) -> str:
     return hashlib.sha256(str(transcript_text or "").encode("utf-8")).hexdigest()
 
@@ -205,6 +186,7 @@ def build_summary_sources(
         sources.append(
             {
                 "ref_index": index,
+                "bvid": str(item.get("bvid") or ""),
                 "video_title": str(item.get("video_title") or item.get("title") or item.get("bvid") or "未知视频"),
                 "up_name": str(item.get("up_name") or "未知 UP"),
                 "timestamp": "摘要",
@@ -222,62 +204,9 @@ async def ensure_video_summary(
     runtime: Runtime,
     bvid: str,
 ) -> dict[str, Any] | None:
-    transcript = runtime.db.get_transcript(bvid)
-    if not transcript:
-        return None
+    from bilibrain.graphs.summary import run_summary_graph
 
-    transcript_hash = compute_transcript_hash(str(transcript.get("transcript_text") or ""))
-    existing = runtime.db.get_video_summary(bvid)
-    if existing and str(existing.get("transcript_hash") or "") == transcript_hash and str(existing.get("summary_text") or "").strip():
-        return existing
-
-    video = runtime.db.get_video(bvid)
-    segment_inputs = build_segment_inputs(list(transcript.get("segments") or []))
-    merged_segments = merge_subtitle_segments(
-        segment_inputs,
-        max_gap=runtime.settings.subtitle_merge_max_gap,
-        max_duration=runtime.settings.subtitle_merge_max_duration,
-        target_chars=runtime.settings.subtitle_chunk_target_chars,
-        min_chars=runtime.settings.subtitle_chunk_min_chars,
-        overlap_chars=runtime.settings.subtitle_chunk_overlap_chars,
-        max_tokens=runtime.settings.subtitle_chunk_max_tokens,
-    )
-    if not merged_segments:
-        return None
-
-    total_chars = sum(len(str(segment.get("content") or "")) for segment in merged_segments)
-    runtime.qwen.ensure_configured()
-    if total_chars <= SUMMARY_DIRECT_CHARS:
-        summary_text = await runtime.qwen.summarize_video(
-            video_title=str((video or {}).get("title") or bvid),
-            transcript_text=format_window_text(merged_segments),
-        )
-    else:
-        windows = pack_summary_windows(merged_segments)
-        window_summaries: list[str] = []
-        for window in windows:
-            summary = await runtime.qwen.summarize_video_window(
-                video_title=str((video or {}).get("title") or bvid),
-                transcript_text=format_window_text(window),
-            )
-            if summary:
-                window_summaries.append(summary)
-        if not window_summaries:
-            return None
-        summary_text = await runtime.qwen.reduce_video_summaries(
-            video_title=str((video or {}).get("title") or bvid),
-            window_summaries=window_summaries,
-        )
-
-    summary_text = str(summary_text or "").strip()
-    if not summary_text:
-        return None
-    runtime.db.save_video_summary(
-        bvid=bvid,
-        transcript_hash=transcript_hash,
-        summary_text=summary_text,
-    )
-    return runtime.db.get_video_summary(bvid)
+    return await run_summary_graph(runtime, bvid)
 
 
 async def load_summary_documents(
@@ -300,18 +229,28 @@ async def load_summary_documents(
         if str(item.get("sync_status") or "") == "indexed"
     ]
     existing_bvids = {str(item.get("bvid") or "") for item in documents}
-    generated = 0
+
+    bvids_to_generate = []
     for video in indexed_videos:
         video_bvid = str(video.get("bvid") or "")
         if not video_bvid or video_bvid in existing_bvids:
             continue
-        summary = await ensure_video_summary(runtime, video_bvid)
-        if summary:
-            generated += 1
-            existing_bvids.add(video_bvid)
-        if generated >= SUMMARY_AUTOGEN_FOLDER_LIMIT:
+        bvids_to_generate.append(video_bvid)
+        if len(bvids_to_generate) >= SUMMARY_AUTOGEN_FOLDER_LIMIT:
             break
 
-    if generated > 0:
-        return runtime.db.list_video_summaries(folder_id)
-    return documents
+    if not bvids_to_generate:
+        return documents
+
+    import asyncio
+
+    results = await asyncio.gather(
+        *[ensure_video_summary(runtime, bvid) for bvid in bvids_to_generate],
+        return_exceptions=True,
+    )
+
+    for bvid, summary in zip(bvids_to_generate, results):
+        if summary and not isinstance(summary, Exception):
+            existing_bvids.add(bvid)
+
+    return runtime.db.list_video_summaries(folder_id)

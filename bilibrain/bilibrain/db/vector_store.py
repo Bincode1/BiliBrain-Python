@@ -119,7 +119,7 @@ class MilvusStore:
         bvid: str,
         video_title: str,
         up_name: str | None,
-        subtitle_source: str | None,
+        transcript_source: str | None,
         manual_tags: list[str],
         chunks: list[dict[str, Any]],
     ) -> None:
@@ -140,7 +140,7 @@ class MilvusStore:
                     "start_seconds": float(chunk["start_seconds"]),
                     "end_seconds": float(chunk["end_seconds"]),
                     "content": chunk["content"][:8192],
-                    "subtitle_source": (subtitle_source or "unknown")[:64],
+                    "subtitle_source": (transcript_source or "unknown")[:64],
                     "manual_tags": manual_tags_text[:512],
                     "embedding": chunk["embedding"],
                 }
@@ -227,7 +227,7 @@ class MilvusStore:
                     "start_seconds": entity.get("start_seconds"),
                     "end_seconds": entity.get("end_seconds"),
                     "content": entity.get("content"),
-                    "subtitle_source": entity.get("subtitle_source"),
+                    "transcript_source": entity.get("subtitle_source"),
                     "manual_tags": entity.get("manual_tags"),
                     "score": float(hit.score),
                 }

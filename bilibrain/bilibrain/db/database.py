@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -12,6 +12,7 @@ from pymysql.cursors import DictCursor
 from bilibrain.core.config import Settings
 from bilibrain.services.common import (
     default_pipeline_state,
+    extract_terms,
     normalize_pipeline_state,
     parse_manual_tags,
     pipeline_error_message,
@@ -148,6 +149,36 @@ class Database:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS ingestion_batches (
+                batch_id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                batch_type VARCHAR(32) NOT NULL DEFAULT 'video_batch',
+                title VARCHAR(255) NULL,
+                options_json LONGTEXT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS ingestion_tasks (
+                task_id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                batch_id BIGINT NULL,
+                bvid VARCHAR(32) NOT NULL,
+                status VARCHAR(24) NOT NULL DEFAULT 'queued',
+                attempt_count INT NOT NULL DEFAULT 0,
+                last_error LONGTEXT NULL,
+                options_json LONGTEXT NULL,
+                worker_id VARCHAR(64) NULL,
+                locked_at DATETIME NULL,
+                started_at DATETIME NULL,
+                finished_at DATETIME NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_ingestion_tasks_status_created (status, created_at),
+                INDEX idx_ingestion_tasks_batch (batch_id, created_at),
+                INDEX idx_ingestion_tasks_bvid (bvid, created_at)
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS chat_conversations (
                 conversation_id BIGINT PRIMARY KEY AUTO_INCREMENT,
                 scope_key VARCHAR(64) NOT NULL UNIQUE,
@@ -192,6 +223,41 @@ class Database:
                 recent_token_estimate INT NOT NULL DEFAULT 0,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     ON UPDATE CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS tool_workspaces (
+                workspace_id VARCHAR(128) PRIMARY KEY,
+                scope_key VARCHAR(128) NOT NULL,
+                feature_name VARCHAR(64) NOT NULL,
+                conversation_id BIGINT NULL,
+                title VARCHAR(255) NULL,
+                actor VARCHAR(64) NOT NULL DEFAULT 'system',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_tool_workspaces_scope (scope_key),
+                INDEX idx_tool_workspaces_conversation (conversation_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS tool_calls (
+                call_id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                trace_id VARCHAR(64) NOT NULL,
+                workspace_id VARCHAR(128) NOT NULL,
+                tool_name VARCHAR(64) NOT NULL,
+                actor VARCHAR(64) NOT NULL,
+                approval_mode VARCHAR(24) NOT NULL DEFAULT 'auto',
+                status VARCHAR(24) NOT NULL DEFAULT 'started',
+                arguments_json LONGTEXT NOT NULL,
+                result_json LONGTEXT NULL,
+                error_json LONGTEXT NULL,
+                duration_ms DOUBLE NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_tool_calls_workspace (workspace_id, created_at),
+                INDEX idx_tool_calls_trace (trace_id)
             )
             """,
         ]
@@ -308,6 +374,263 @@ class Database:
         payload = {"max_video_minutes": max(int(max_video_minutes), 1)}
         self.save_state("processing_settings", payload)
         return payload
+
+    def create_tool_workspace(
+        self,
+        *,
+        workspace_id: str,
+        scope_key: str,
+        feature_name: str,
+        conversation_id: int | None = None,
+        title: str | None = None,
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        existing = self.get_tool_workspace_by_scope_key(scope_key)
+        if existing:
+            return existing
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO tool_workspaces (
+                        workspace_id,
+                        scope_key,
+                        feature_name,
+                        conversation_id,
+                        title,
+                        actor
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        feature_name = VALUES(feature_name),
+                        conversation_id = VALUES(conversation_id),
+                        title = VALUES(title),
+                        actor = VALUES(actor)
+                    """,
+                    (
+                        workspace_id,
+                        scope_key,
+                        feature_name,
+                        conversation_id,
+                        title,
+                        actor,
+                    ),
+                )
+        row = self.get_tool_workspace(workspace_id)
+        if not row:
+            raise RuntimeError("创建工具工作区失败")
+        return row
+
+    def get_tool_workspace_by_scope_key(self, scope_key: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        workspace_id,
+                        scope_key,
+                        feature_name,
+                        conversation_id,
+                        title,
+                        actor,
+                        created_at,
+                        updated_at
+                    FROM tool_workspaces
+                    WHERE scope_key = %s
+                    """,
+                    (scope_key,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "workspace_id": str(row["workspace_id"]),
+            "scope_key": str(row["scope_key"]),
+            "feature_name": str(row["feature_name"]),
+            "conversation_id": int(row["conversation_id"]) if row.get("conversation_id") else None,
+            "title": str(row["title"] or "").strip(),
+            "actor": str(row["actor"] or "system"),
+            "created_at": _format_datetime(row.get("created_at")),
+            "updated_at": _format_datetime(row.get("updated_at")),
+        }
+
+    def get_tool_workspace(self, workspace_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        workspace_id,
+                        scope_key,
+                        feature_name,
+                        conversation_id,
+                        title,
+                        actor,
+                        created_at,
+                        updated_at
+                    FROM tool_workspaces
+                    WHERE workspace_id = %s
+                    """,
+                    (workspace_id,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "workspace_id": str(row["workspace_id"]),
+            "scope_key": str(row["scope_key"]),
+            "feature_name": str(row["feature_name"]),
+            "conversation_id": int(row["conversation_id"]) if row.get("conversation_id") else None,
+            "title": str(row["title"] or "").strip(),
+            "actor": str(row["actor"] or "system"),
+            "created_at": _format_datetime(row.get("created_at")),
+            "updated_at": _format_datetime(row.get("updated_at")),
+        }
+
+    def list_tool_workspaces(self, *, feature_name: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        safe_limit = max(int(limit or 100), 1)
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                if feature_name:
+                    cursor.execute(
+                        """
+                        SELECT
+                            workspace_id,
+                            scope_key,
+                            feature_name,
+                            conversation_id,
+                            title,
+                            actor,
+                            created_at,
+                            updated_at
+                        FROM tool_workspaces
+                        WHERE feature_name = %s
+                        ORDER BY updated_at DESC, created_at DESC
+                        LIMIT %s
+                        """,
+                        (feature_name, safe_limit),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT
+                            workspace_id,
+                            scope_key,
+                            feature_name,
+                            conversation_id,
+                            title,
+                            actor,
+                            created_at,
+                            updated_at
+                        FROM tool_workspaces
+                        ORDER BY updated_at DESC, created_at DESC
+                        LIMIT %s
+                        """,
+                        (safe_limit,),
+                    )
+                rows = list(cursor.fetchall())
+        return [
+            {
+                "workspace_id": str(row["workspace_id"]),
+                "scope_key": str(row["scope_key"]),
+                "feature_name": str(row["feature_name"]),
+                "conversation_id": int(row["conversation_id"]) if row.get("conversation_id") else None,
+                "title": str(row["title"] or "").strip(),
+                "actor": str(row["actor"] or "system"),
+                "created_at": _format_datetime(row.get("created_at")),
+                "updated_at": _format_datetime(row.get("updated_at")),
+            }
+            for row in rows
+        ]
+
+    def log_tool_call(
+        self,
+        *,
+        trace_id: str,
+        workspace_id: str,
+        tool_name: str,
+        actor: str,
+        approval_mode: str,
+        status: str,
+        arguments: dict[str, Any],
+        result: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+        duration_ms: float = 0.0,
+    ) -> dict[str, Any]:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO tool_calls (
+                        trace_id,
+                        workspace_id,
+                        tool_name,
+                        actor,
+                        approval_mode,
+                        status,
+                        arguments_json,
+                        result_json,
+                        error_json,
+                        duration_ms
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        trace_id,
+                        workspace_id,
+                        tool_name,
+                        actor,
+                        approval_mode,
+                        status,
+                        json.dumps(arguments or {}, ensure_ascii=False),
+                        json.dumps(result or {}, ensure_ascii=False) if result is not None else None,
+                        json.dumps(error or {}, ensure_ascii=False) if error is not None else None,
+                        round(float(duration_ms or 0.0), 3),
+                    ),
+                )
+                call_id = int(cursor.lastrowid)
+                cursor.execute(
+                    """
+                    SELECT
+                        call_id,
+                        trace_id,
+                        workspace_id,
+                        tool_name,
+                        actor,
+                        approval_mode,
+                        status,
+                        arguments_json,
+                        result_json,
+                        error_json,
+                        duration_ms,
+                        created_at,
+                        updated_at
+                    FROM tool_calls
+                    WHERE call_id = %s
+                    """,
+                    (call_id,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            raise RuntimeError("记录工具调用失败")
+        return self._format_tool_call(row)
+
+    def _format_tool_call(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "call_id": int(row["call_id"]),
+            "trace_id": str(row["trace_id"]),
+            "workspace_id": str(row["workspace_id"]),
+            "tool_name": str(row["tool_name"]),
+            "actor": str(row["actor"]),
+            "approval_mode": str(row["approval_mode"]),
+            "status": str(row["status"]),
+            "arguments": json.loads(row["arguments_json"]) if row.get("arguments_json") else {},
+            "result": json.loads(row["result_json"]) if row.get("result_json") else None,
+            "error": json.loads(row["error_json"]) if row.get("error_json") else None,
+            "duration_ms": round(float(row.get("duration_ms") or 0.0), 3),
+            "created_at": _format_datetime(row.get("created_at")),
+            "updated_at": _format_datetime(row.get("updated_at")),
+        }
 
     def get_chat_conversation(self, conversation_id: int) -> dict[str, Any] | None:
         with self.connection() as conn:
@@ -799,11 +1122,11 @@ class Database:
             raise RuntimeError("消息内容不能为空")
 
         normalized_answer_mode = str(answer_mode or "").strip().lower() or None
-        if normalized_answer_mode not in {None, "summary", "chunk"}:
+        if normalized_answer_mode not in {None, "summary", "chunk", "research"}:
             raise RuntimeError("不支持的回答模式")
 
         normalized_route_mode = str(route_mode or "").strip().lower() or None
-        if normalized_route_mode not in {None, "history_only", "summary_only", "chunk_only", "mixed"}:
+        if normalized_route_mode not in {None, "history_only", "summary_only", "chunk_only", "mixed", "research"}:
             raise RuntimeError("不支持的路由模式")
 
         sources_json = json.dumps(sources or [], ensure_ascii=False) if sources is not None else None
@@ -912,7 +1235,6 @@ class Database:
                         v.duration,
                         v.published_at,
                         v.cid,
-                        v.subtitle_source,
                         v.manual_tags,
                         v.is_invalid,
                         v.audio_storage_provider,
@@ -943,6 +1265,9 @@ class Database:
                 transcript_source=row.get("transcript_source"),
                 transcript_segment_count=row.get("transcript_segment_count"),
                 transcript_updated_at=row.get("transcript_updated_at"),
+                audio_storage_provider=row.get("audio_storage_provider"),
+                audio_object_key=row.get("audio_object_key"),
+                audio_uploaded_at=row.get("audio_uploaded_at"),
             )
             result.append(
                 {
@@ -954,7 +1279,6 @@ class Database:
                     "duration": int(row.get("duration") or 0),
                     "published_at": _format_datetime(row.get("published_at")),
                     "cid": row.get("cid"),
-                    "subtitle_source": row.get("subtitle_source"),
                     "manual_tags": parse_manual_tags(row.get("manual_tags")),
                     "is_invalid": bool(row.get("is_invalid")),
                     "audio_storage_provider": row.get("audio_storage_provider"),
@@ -1032,7 +1356,7 @@ class Database:
                         video.get("duration", 0),
                         video.get("published_at"),
                         video.get("cid"),
-                        video.get("subtitle_source"),
+                        video.get("transcript_source") or video.get("subtitle_source"),
                         manual_tags_value,
                         1 if video.get("is_invalid") else 0,
                         video.get("audio_storage_provider"),
@@ -1057,7 +1381,7 @@ class Database:
         *,
         bvid: str,
         cid: int | None = None,
-        subtitle_source: str | None = "asr-manual",
+        transcript_source: str | None = None,
         audio_storage_provider: str | None = None,
         audio_object_key: str | None = None,
     ) -> None:
@@ -1076,12 +1400,12 @@ class Database:
                     """,
                     (
                         cid,
-                        subtitle_source,
+                        transcript_source,
                         audio_storage_provider,
                         audio_object_key,
                         audio_object_key,
                         datetime.utcnow(),
-                        subtitle_source,
+                        transcript_source,
                         datetime.utcnow(),
                         bvid,
                     ),
@@ -1094,14 +1418,28 @@ class Database:
                     """
                     UPDATE videos
                     SET subtitle_source = NULL,
-                        audio_storage_provider = NULL,
-                        audio_object_key = NULL,
-                        audio_uploaded_at = NULL,
                         synced_at = NULL
                     WHERE bvid = %s
                     """,
                     (bvid,),
                 )
+
+    def reset_video_processing_artifacts(self, bvid: str) -> None:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("DELETE FROM transcripts WHERE bvid = %s", (bvid,))
+                cursor.execute("DELETE FROM video_summaries WHERE bvid = %s", (bvid,))
+                cursor.execute("DELETE FROM video_pipeline WHERE bvid = %s", (bvid,))
+                cursor.execute(
+                    """
+                    UPDATE videos
+                    SET subtitle_source = NULL,
+                        synced_at = NULL
+                    WHERE bvid = %s
+                    """,
+                    (bvid,),
+                )
+                cursor.execute("DELETE FROM ingestion_tasks WHERE bvid = %s", (bvid,))
 
     def list_all_video_bvids(self) -> list[str]:
         with self.connection() as conn:
@@ -1240,6 +1578,93 @@ class Database:
             row["created_at"] = _format_datetime(row.get("created_at"))
         return rows
 
+    def search_video_summaries(
+        self,
+        query_text: str,
+        *,
+        folder_id: int | None = None,
+        bvid: str | None = None,
+        limit: int = 6,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(int(limit), 1)
+        query_terms = [term for term in extract_terms(query_text) if str(term or "").strip()]
+        sql = [
+            """
+            SELECT
+                s.bvid,
+                s.transcript_hash,
+                s.summary_text,
+                s.updated_at,
+                v.folder_id,
+                v.title AS video_title,
+                v.up_name,
+                v.published_at,
+                v.created_at
+            FROM video_summaries s
+            INNER JOIN videos v ON v.bvid = s.bvid
+            """
+        ]
+        params: list[Any] = []
+        where_parts: list[str] = []
+
+        if bvid:
+            where_parts.append("s.bvid = %s")
+            params.append(str(bvid))
+        elif folder_id is not None:
+            where_parts.append("v.folder_id = %s")
+            params.append(int(folder_id))
+
+        if query_terms:
+            term_conditions: list[str] = []
+            for term in query_terms[:8]:
+                like_value = f"%{str(term).lower()}%"
+                term_conditions.append(
+                    "(LOWER(v.title) LIKE %s OR LOWER(COALESCE(v.up_name, '')) LIKE %s OR LOWER(s.summary_text) LIKE %s)"
+                )
+                params.extend([like_value, like_value, like_value])
+            where_parts.append(f"({' OR '.join(term_conditions)})")
+
+        if where_parts:
+            sql.append(f"WHERE {' AND '.join(where_parts)}")
+
+        sql.append("ORDER BY COALESCE(v.published_at, v.created_at) DESC, v.created_at DESC")
+        sql.append("LIMIT %s")
+        params.append(max(safe_limit * 4, 12))
+
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("\n".join(sql), tuple(params))
+                rows = list(cursor.fetchall())
+
+        if query_terms:
+            rescored: list[dict[str, Any]] = []
+            query_term_set = set(query_terms)
+            for row in rows:
+                combined_text = f"{row.get('video_title', '')} {row.get('up_name', '')} {row.get('summary_text', '')}"
+                hit_terms = extract_terms(combined_text)
+                overlap = len(query_term_set & hit_terms)
+                if overlap <= 0:
+                    continue
+                rescored.append({**row, "_match_score": overlap})
+            rescored.sort(
+                key=lambda item: (
+                    int(item.get("_match_score") or 0),
+                    str(item.get("published_at") or ""),
+                    str(item.get("created_at") or ""),
+                ),
+                reverse=True,
+            )
+            rows = rescored[:safe_limit]
+        else:
+            rows = rows[:safe_limit]
+
+        for row in rows:
+            row["updated_at"] = _format_datetime(row.get("updated_at"))
+            row["published_at"] = _format_datetime(row.get("published_at"))
+            row["created_at"] = _format_datetime(row.get("created_at"))
+            row.pop("_match_score", None)
+        return rows
+
     def save_video_summary(
         self,
         *,
@@ -1281,6 +1706,9 @@ class Database:
                     """
                     SELECT
                         p.state_json,
+                        v.audio_storage_provider,
+                        v.audio_object_key,
+                        v.audio_uploaded_at,
                         t.source_model AS transcript_source,
                         t.segment_count AS transcript_segment_count,
                         t.updated_at AS transcript_updated_at
@@ -1300,6 +1728,9 @@ class Database:
             transcript_source=row.get("transcript_source"),
             transcript_segment_count=row.get("transcript_segment_count"),
             transcript_updated_at=row.get("transcript_updated_at"),
+            audio_storage_provider=row.get("audio_storage_provider"),
+            audio_object_key=row.get("audio_object_key"),
+            audio_uploaded_at=row.get("audio_uploaded_at"),
         )
 
     def get_pipeline_overall_statuses(self, bvids: list[str]) -> dict[str, str]:
@@ -1396,13 +1827,448 @@ class Database:
                     """
                     UPDATE videos
                     SET subtitle_source = NULL,
-                        audio_storage_provider = NULL,
-                        audio_object_key = NULL,
-                        audio_uploaded_at = NULL,
                         synced_at = NULL
                     """
                 )
         return int(affected or 0)
+
+    def create_ingestion_batch(
+        self,
+        *,
+        batch_type: str = "video_batch",
+        title: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_batch_type = " ".join(str(batch_type or "video_batch").split()).strip() or "video_batch"
+        normalized_title = self._normalize_chat_title(title)
+        options_json = json.dumps(options or {}, ensure_ascii=False) if options is not None else None
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO ingestion_batches (batch_type, title, options_json)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (normalized_batch_type[:32], normalized_title, options_json),
+                )
+                batch_id = int(cursor.lastrowid)
+                cursor.execute(
+                    """
+                    SELECT batch_id, batch_type, title, options_json, created_at
+                    FROM ingestion_batches
+                    WHERE batch_id = %s
+                    """,
+                    (batch_id,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            raise RuntimeError("创建批处理任务失败")
+        return self._format_ingestion_batch(row)
+
+    def get_ingestion_batch(self, batch_id: int) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT batch_id, batch_type, title, options_json, created_at
+                    FROM ingestion_batches
+                    WHERE batch_id = %s
+                    """,
+                    (batch_id,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            return None
+        return self._format_ingestion_batch(row)
+
+    def list_ingestion_batches(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT batch_id, batch_type, title, options_json, created_at
+                    FROM ingestion_batches
+                    ORDER BY batch_id DESC
+                    LIMIT %s
+                    """,
+                    (max(int(limit), 1),),
+                )
+                rows = list(cursor.fetchall())
+        return [self._format_ingestion_batch(row) for row in rows]
+
+    def create_ingestion_task(
+        self,
+        *,
+        bvid: str,
+        batch_id: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        existing = self.get_active_ingestion_task_for_bvid(bvid)
+        if existing:
+            return existing
+
+        options_json = json.dumps(options or {}, ensure_ascii=False) if options is not None else None
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO ingestion_tasks (batch_id, bvid, options_json)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (batch_id, bvid, options_json),
+                )
+                task_id = int(cursor.lastrowid)
+                cursor.execute(
+                    """
+                    SELECT
+                        task_id,
+                        batch_id,
+                        bvid,
+                        status,
+                        attempt_count,
+                        last_error,
+                        options_json,
+                        worker_id,
+                        locked_at,
+                        started_at,
+                        finished_at,
+                        created_at,
+                        updated_at
+                    FROM ingestion_tasks
+                    WHERE task_id = %s
+                    """,
+                    (task_id,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            raise RuntimeError("创建 ingestion 任务失败")
+        return self._format_ingestion_task(row)
+
+    def list_ingestion_tasks(
+        self,
+        *,
+        batch_id: int | None = None,
+        statuses: list[str] | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        query = [
+            """
+            SELECT
+                task_id,
+                batch_id,
+                bvid,
+                status,
+                attempt_count,
+                last_error,
+                options_json,
+                worker_id,
+                locked_at,
+                started_at,
+                finished_at,
+                created_at,
+                updated_at
+            FROM ingestion_tasks
+            WHERE 1 = 1
+            """
+        ]
+        params: list[Any] = []
+        if batch_id is not None:
+            query.append("AND batch_id = %s")
+            params.append(int(batch_id))
+        if statuses:
+            placeholders = ", ".join(["%s"] * len(statuses))
+            query.append(f"AND status IN ({placeholders})")
+            params.extend(str(status or "").strip().lower() for status in statuses)
+        query.append("ORDER BY task_id DESC LIMIT %s")
+        params.append(max(int(limit), 1))
+
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("\n".join(query), tuple(params))
+                rows = list(cursor.fetchall())
+        return [self._format_ingestion_task(row) for row in rows]
+
+    def get_ingestion_task(self, task_id: int) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        task_id,
+                        batch_id,
+                        bvid,
+                        status,
+                        attempt_count,
+                        last_error,
+                        options_json,
+                        worker_id,
+                        locked_at,
+                        started_at,
+                        finished_at,
+                        created_at,
+                        updated_at
+                    FROM ingestion_tasks
+                    WHERE task_id = %s
+                    """,
+                    (task_id,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            return None
+        return self._format_ingestion_task(row)
+
+    def get_active_ingestion_task_for_bvid(self, bvid: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        task_id,
+                        batch_id,
+                        bvid,
+                        status,
+                        attempt_count,
+                        last_error,
+                        options_json,
+                        worker_id,
+                        locked_at,
+                        started_at,
+                        finished_at,
+                        created_at,
+                        updated_at
+                    FROM ingestion_tasks
+                    WHERE bvid = %s AND status IN ('queued', 'running')
+                    ORDER BY task_id DESC
+                    LIMIT 1
+                    """,
+                    (bvid,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            return None
+        return self._format_ingestion_task(row)
+
+    def claim_next_ingestion_task(
+        self,
+        *,
+        worker_id: str,
+        stale_after_seconds: int = 1800,
+    ) -> dict[str, Any] | None:
+        worker_name = " ".join(str(worker_id or "").split()).strip()[:64]
+        if not worker_name:
+            raise RuntimeError("worker_id 不能为空")
+        stale_cutoff = datetime.utcnow() - timedelta(seconds=max(int(stale_after_seconds), 60))
+
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT task_id, bvid
+                    FROM ingestion_tasks
+                    WHERE status = 'queued'
+                    ORDER BY created_at ASC, task_id ASC
+                    LIMIT 20
+                    """
+                )
+                candidates = list(cursor.fetchall())
+
+            for item in candidates:
+                task_id = int(item["task_id"])
+                bvid = str(item["bvid"])
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE ingestion_tasks candidate
+                        LEFT JOIN ingestion_tasks active
+                            ON active.bvid = candidate.bvid
+                           AND active.status = 'running'
+                           AND active.task_id <> candidate.task_id
+                        SET
+                            candidate.status = 'running',
+                            candidate.worker_id = %s,
+                            candidate.locked_at = %s,
+                            candidate.started_at = COALESCE(candidate.started_at, %s),
+                            candidate.attempt_count = candidate.attempt_count + 1
+                        WHERE
+                            candidate.task_id = %s
+                            AND candidate.status = 'queued'
+                            AND (
+                                candidate.locked_at IS NULL
+                                OR candidate.locked_at < %s
+                            )
+                            AND active.task_id IS NULL
+                        """,
+                        (
+                            worker_name,
+                            datetime.utcnow(),
+                            datetime.utcnow(),
+                            task_id,
+                            stale_cutoff,
+                        ),
+                    )
+                    if int(cursor.rowcount or 0) <= 0:
+                        continue
+                    cursor.execute(
+                        """
+                        SELECT
+                            task_id,
+                            batch_id,
+                            bvid,
+                            status,
+                            attempt_count,
+                            last_error,
+                            options_json,
+                            worker_id,
+                            locked_at,
+                            started_at,
+                            finished_at,
+                            created_at,
+                            updated_at
+                        FROM ingestion_tasks
+                        WHERE task_id = %s
+                        """,
+                        (task_id,),
+                    )
+                    row = cursor.fetchone()
+                if row:
+                    return self._format_ingestion_task(row)
+        return None
+
+    def mark_ingestion_task_succeeded(self, task_id: int) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE ingestion_tasks
+                    SET status = 'succeeded',
+                        last_error = NULL,
+                        worker_id = NULL,
+                        locked_at = NULL,
+                        finished_at = %s
+                    WHERE task_id = %s
+                    """,
+                    (datetime.utcnow(), task_id),
+                )
+        return self.get_ingestion_task(task_id)
+
+    def mark_ingestion_task_failed(self, task_id: int, error: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE ingestion_tasks
+                    SET status = 'failed',
+                        last_error = %s,
+                        worker_id = NULL,
+                        locked_at = NULL,
+                        finished_at = %s
+                    WHERE task_id = %s
+                    """,
+                    (str(error or "").strip()[:4000], datetime.utcnow(), task_id),
+                )
+        return self.get_ingestion_task(task_id)
+
+    def mark_ingestion_task_stale(self, task_id: int) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE ingestion_tasks
+                    SET status = 'failed',
+                        last_error = '任务超时未响应，已被重置',
+                        worker_id = NULL,
+                        locked_at = NULL,
+                        finished_at = %s
+                    WHERE task_id = %s AND status = 'running'
+                    """,
+                    (datetime.utcnow(), task_id),
+                )
+        return self.get_ingestion_task(task_id)
+
+    def touch_ingestion_task_lock(self, task_id: int, *, worker_id: str | None = None) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                if worker_id:
+                    cursor.execute(
+                        """
+                        UPDATE ingestion_tasks
+                        SET locked_at = %s
+                        WHERE task_id = %s AND status = 'running' AND worker_id = %s
+                        """,
+                        (datetime.utcnow(), task_id, str(worker_id).strip()),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        UPDATE ingestion_tasks
+                        SET locked_at = %s
+                        WHERE task_id = %s AND status = 'running'
+                        """,
+                        (datetime.utcnow(), task_id),
+                    )
+        return self.get_ingestion_task(task_id)
+
+    def mark_stale_ingestion_tasks(
+        self,
+        *,
+        stale_after_seconds: int = 1800,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        stale_cutoff = datetime.utcnow() - timedelta(seconds=max(int(stale_after_seconds), 60))
+        safe_limit = max(int(limit or 100), 1)
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT task_id
+                    FROM ingestion_tasks
+                    WHERE status = 'running'
+                      AND locked_at IS NOT NULL
+                      AND locked_at < %s
+                    ORDER BY locked_at ASC, task_id ASC
+                    LIMIT %s
+                    """,
+                    (stale_cutoff, safe_limit),
+                )
+                rows = list(cursor.fetchall())
+
+        tasks: list[dict[str, Any]] = []
+        for row in rows:
+            task = self.mark_ingestion_task_stale(int(row["task_id"]))
+            if task:
+                tasks.append(task)
+        return tasks
+
+    def cancel_ingestion_task(self, task_id: int) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE ingestion_tasks
+                    SET status = 'cancelled',
+                        worker_id = NULL,
+                        locked_at = NULL,
+                        finished_at = CASE WHEN finished_at IS NULL THEN %s ELSE finished_at END
+                    WHERE task_id = %s AND status = 'queued'
+                    """,
+                    (datetime.utcnow(), task_id),
+                )
+        return self.get_ingestion_task(task_id)
+
+    def delete_ingestion_tasks_for_bvid(self, bvid: str) -> int:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM ingestion_tasks WHERE bvid = %s",
+                    (bvid,),
+                )
+                return int(cursor.rowcount or 0)
+
+    def delete_all_ingestion_tasks(self) -> int:
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("DELETE FROM ingestion_tasks")
+                return int(cursor.rowcount or 0)
 
     def get_counts(self) -> dict[str, int]:
         with self.connection() as conn:
@@ -1433,9 +2299,22 @@ class Database:
         transcript_source: str | None,
         transcript_segment_count: Any,
         transcript_updated_at: Any,
+        audio_storage_provider: str | None,
+        audio_object_key: str | None,
+        audio_uploaded_at: Any,
     ) -> dict[str, dict[str, Any]]:
         raw_state = json.loads(raw_state_json) if raw_state_json else None
         state = normalize_pipeline_state(raw_state)
+        if audio_storage_provider and audio_object_key and state["audio"]["status"] == "pending":
+            state["audio"].update(
+                {
+                    "status": "done",
+                    "provider": audio_storage_provider,
+                    "object_key": audio_object_key,
+                    "path": f"{audio_storage_provider}://{audio_object_key}",
+                    "updated_at": _format_datetime(audio_uploaded_at),
+                }
+            )
         if transcript_source and state["transcript"]["status"] == "pending":
             state["transcript"].update(
                 {
@@ -1510,5 +2389,41 @@ class Database:
             "memory_token_estimate": int(row.get("memory_token_estimate") or 0),
             "uncompacted_token_estimate": int(row.get("uncompacted_token_estimate") or 0),
             "recent_token_estimate": int(row.get("recent_token_estimate") or 0),
+            "updated_at": _format_datetime(row.get("updated_at")),
+        }
+
+    def _format_ingestion_batch(self, row: dict[str, Any]) -> dict[str, Any]:
+        options_json = row.get("options_json")
+        try:
+            options = json.loads(options_json) if options_json else {}
+        except json.JSONDecodeError:
+            options = {}
+        return {
+            "batch_id": int(row["batch_id"]),
+            "batch_type": str(row.get("batch_type") or "").strip() or "video_batch",
+            "title": str(row.get("title") or "").strip(),
+            "options": options if isinstance(options, dict) else {},
+            "created_at": _format_datetime(row.get("created_at")),
+        }
+
+    def _format_ingestion_task(self, row: dict[str, Any]) -> dict[str, Any]:
+        options_json = row.get("options_json")
+        try:
+            options = json.loads(options_json) if options_json else {}
+        except json.JSONDecodeError:
+            options = {}
+        return {
+            "task_id": int(row["task_id"]),
+            "batch_id": int(row["batch_id"]) if row.get("batch_id") is not None else None,
+            "bvid": str(row.get("bvid") or "").strip(),
+            "status": str(row.get("status") or "").strip().lower() or "queued",
+            "attempt_count": int(row.get("attempt_count") or 0),
+            "last_error": str(row.get("last_error") or "").strip(),
+            "options": options if isinstance(options, dict) else {},
+            "worker_id": str(row.get("worker_id") or "").strip() or None,
+            "locked_at": _format_datetime(row.get("locked_at")),
+            "started_at": _format_datetime(row.get("started_at")),
+            "finished_at": _format_datetime(row.get("finished_at")),
+            "created_at": _format_datetime(row.get("created_at")),
             "updated_at": _format_datetime(row.get("updated_at")),
         }

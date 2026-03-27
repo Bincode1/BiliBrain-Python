@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import io
+import re
 import time
 from datetime import datetime
 from functools import reduce
@@ -20,6 +22,7 @@ from bilibrain.db.database import Database
 
 
 AUTH_COOKIE_NAMES = {"SESSDATA", "bili_jct", "DedeUserID", "DedeUserID__ckMd5"}
+HTML_TAG_RE = re.compile(r"<[^>]+>")
 MIXIN_KEY_ENC_TAB = [
     46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
     27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
@@ -351,20 +354,67 @@ class BilibiliClient:
             page += 1
         return videos
 
-    def _resolve_subtitle_url(self, subtitle_url: str | None) -> str | None:
-        if not subtitle_url:
-            return None
-        raw = subtitle_url.strip()
-        if not raw or raw == "/":
-            return None
-        if raw.startswith("//"):
-            return f"https:{raw}"
-        parsed = urlparse(raw)
-        if parsed.scheme in {"http", "https"}:
-            return raw
-        if raw.startswith("/"):
-            return urljoin("https://api.bilibili.com", raw)
-        return urljoin("https://api.bilibili.com/", raw)
+    def _strip_html(self, text: str | None) -> str:
+        raw = html.unescape(str(text or ""))
+        return " ".join(HTML_TAG_RE.sub(" ", raw).split()).strip()
+
+    async def search_videos(
+        self,
+        keyword: str,
+        *,
+        page: int = 1,
+        page_size: int = 12,
+        order: str = "totalrank",
+    ) -> dict[str, Any]:
+        normalized_keyword = " ".join(str(keyword or "").split()).strip()
+        if not normalized_keyword:
+            raise RuntimeError("搜索关键词不能为空。")
+
+        payload = await self._get_json(
+            "https://api.bilibili.com/x/web-interface/search/type",
+            params={
+                "search_type": "video",
+                "keyword": normalized_keyword,
+                "page": max(int(page), 1),
+                "page_size": min(max(int(page_size), 1), 30),
+                "order": order,
+            },
+        )
+        data = payload.get("data") or {}
+        items = data.get("result") or []
+
+        results: list[dict[str, Any]] = []
+        for item in items:
+            bvid = str(item.get("bvid") or "").strip()
+            if not bvid:
+                continue
+            results.append(
+                {
+                    "bvid": bvid,
+                    "title": self._strip_html(item.get("title")),
+                    "up_name": self._strip_html(item.get("author")),
+                    "description": self._strip_html(item.get("description")),
+                    "cover_url": self._resolve_cover_url(item.get("pic")),
+                    "duration_text": str(item.get("duration") or "").strip(),
+                    "play_count": int(item.get("play") or 0),
+                    "favorites": int(item.get("favorites") or 0),
+                    "tag_text": self._strip_html(item.get("tag")),
+                    "published_at": (
+                        datetime.utcfromtimestamp(int(item.get("pubdate") or 0))
+                        if item.get("pubdate")
+                        else None
+                    ),
+                    "watch_url": f"https://www.bilibili.com/video/{bvid}/",
+                }
+            )
+
+        return {
+            "keyword": normalized_keyword,
+            "page": int(data.get("page") or max(int(page), 1)),
+            "page_size": int(data.get("pagesize") or min(max(int(page_size), 1), 30)),
+            "total": int(data.get("numResults") or 0),
+            "results": results,
+        }
 
     def _resolve_cover_url(self, cover_url: str | None) -> str | None:
         if not cover_url:
@@ -380,26 +430,6 @@ class BilibiliClient:
         if raw.startswith("/"):
             return urljoin("https://i0.hdslb.com", raw)
         return raw
-
-    def _subtitle_priority(self, candidate: dict[str, Any]) -> tuple[int, int]:
-        lan = (candidate.get("lan") or "").lower()
-        is_ai = lan.startswith("ai-") or candidate.get("type") == 1
-        is_zh = "zh" in lan
-        if is_zh and not is_ai:
-            return (0, 0)
-        if not is_ai:
-            return (1, 0)
-        if is_zh:
-            return (2, 0)
-        return (3, 0)
-
-    def _classify_subtitle_source(self, candidate: dict[str, Any]) -> str:
-        lan = (candidate.get("lan") or "").lower()
-        if lan.startswith("ai-") or candidate.get("type") == 1:
-            return "ai-auto"
-        if lan.startswith("zh"):
-            return "manual-zh"
-        return "manual"
 
     async def fetch_audio_track(self, bvid: str) -> dict[str, Any]:
         view_payload = await self._get_json(
@@ -453,56 +483,3 @@ class BilibiliClient:
                 async for chunk in response.aiter_bytes():
                     file.write(chunk)
         return track
-
-    async def fetch_subtitles(self, bvid: str) -> dict[str, Any]:
-        view_payload = await self._get_json(
-            "https://api.bilibili.com/x/web-interface/view",
-            params={"bvid": bvid},
-            use_wbi=True,
-        )
-        view_data = view_payload.get("data") or {}
-        cid = view_data.get("cid")
-        if not cid:
-            pages = view_data.get("pages") or []
-            cid = pages[0]["cid"] if pages else None
-        if not cid:
-            raise RuntimeError(f"{bvid} 没有可用 cid。")
-
-        player_payload = await self._get_json(
-            "https://api.bilibili.com/x/player/v2",
-            params={"bvid": bvid, "cid": cid},
-        )
-        subtitle_data = player_payload.get("data", {}).get("subtitle", {})
-        subtitles = subtitle_data.get("subtitles") or []
-        if not subtitles:
-            raise RuntimeError(f"{bvid} 没有官方或 CC 字幕。")
-
-        candidates = sorted(subtitles, key=self._subtitle_priority)
-        chosen = None
-        subtitle_url = None
-        for candidate in candidates:
-            resolved_url = self._resolve_subtitle_url(candidate.get("subtitle_url"))
-            if resolved_url:
-                chosen = candidate
-                subtitle_url = resolved_url
-                break
-        if not chosen or not subtitle_url:
-            raise RuntimeError(f"{bvid} 返回了字幕候选，但字幕 URL 无效。")
-        response = await self.client.get(subtitle_url)
-        response.raise_for_status()
-        subtitle_payload = response.json()
-        body = subtitle_payload.get("body") or []
-        normalized = [
-            {
-                "from": float(item["from"]),
-                "to": float(item["to"]),
-                "content": item["content"],
-            }
-            for item in body
-        ]
-        await asyncio.sleep(self.settings.bili_api_delay)
-        return {
-            "cid": int(cid),
-            "source": self._classify_subtitle_source(chosen),
-            "subtitles": normalized,
-        }

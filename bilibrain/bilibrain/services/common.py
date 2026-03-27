@@ -62,9 +62,9 @@ def _join_text_parts(parts: list[str]) -> str:
     return merged
 
 
-def _normalize_subtitle_items(subtitles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _normalize_transcript_segment_items(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for item in subtitles:
+    for item in segments:
         content = str(item.get("content") or "").strip()
         if not content:
             continue
@@ -224,7 +224,7 @@ def _expand_semantic_units(
     return expanded
 
 
-def _build_sentence_units(subtitles: list[dict[str, Any]], *, max_gap: float) -> list[dict[str, Any]]:
+def _build_sentence_units(segments: list[dict[str, Any]], *, max_gap: float) -> list[dict[str, Any]]:
     units: list[dict[str, Any]] = []
     current_parts: list[str] = []
     current_start: float | None = None
@@ -255,7 +255,7 @@ def _build_sentence_units(subtitles: list[dict[str, Any]], *, max_gap: float) ->
         current_end = None
         current_hard_boundary = False
 
-    normalized = _normalize_subtitle_items(subtitles)
+    normalized = _normalize_transcript_segment_items(segments)
     for item in normalized:
         content = item["content"]
         start_seconds = item["start_seconds"]
@@ -283,8 +283,8 @@ def _build_sentence_units(subtitles: list[dict[str, Any]], *, max_gap: float) ->
     return units
 
 
-def merge_subtitle_segments(
-    subtitles: list[dict[str, Any]],
+def merge_transcript_segments(
+    segments: list[dict[str, Any]],
     *,
     max_gap: float,
     max_duration: float,
@@ -293,7 +293,7 @@ def merge_subtitle_segments(
     overlap_chars: int = DEFAULT_CHUNK_OVERLAP_CHARS,
     max_tokens: int = DEFAULT_CHUNK_MAX_TOKENS,
 ) -> list[dict[str, Any]]:
-    if not subtitles:
+    if not segments:
         return []
     safe_target_chars = max(int(target_chars), 1)
     safe_max_tokens = max(int(max_tokens), 1)
@@ -301,7 +301,7 @@ def merge_subtitle_segments(
     # guardrail so the packer does not stop too early on Chinese transcripts.
     effective_target_chars = max(safe_target_chars, safe_max_tokens * 2)
     units = _expand_semantic_units(
-        _build_sentence_units(subtitles, max_gap=max_gap),
+        _build_sentence_units(segments, max_gap=max_gap),
         max_chars=effective_target_chars,
         max_tokens=safe_max_tokens,
     )
@@ -660,6 +660,12 @@ def pipeline_overall_status(state: dict[str, dict[str, Any]]) -> str:
         return "failed"
     if all(status == "done" for status in statuses):
         return "indexed"
+    if (
+        state["audio"]["status"] == "done"
+        and state["transcript"]["status"] == "pending"
+        and state["index"]["status"] == "pending"
+    ):
+        return "pending"
     if any(status == "done" for status in statuses):
         return "partial"
     return "pending"
@@ -686,10 +692,14 @@ def pipeline_action_label(state: dict[str, dict[str, Any]]) -> str:
     overall = pipeline_overall_status(state)
     if overall == "indexed":
         return "已转写入库"
-    if overall in {"failed", "partial"}:
+    if overall == "failed":
         return "重试处理"
     if overall == "processing":
         return "处理中"
+    if overall == "partial":
+        if state["transcript"]["status"] == "done" or state["index"]["status"] == "done":
+            return "重试处理"
+        return "开始处理"
     return "开始处理"
 
 
@@ -698,3 +708,21 @@ def parse_manual_tags(raw: str | None) -> list[str]:
         return []
     parts = re.split(r"[,，\n]+", raw)
     return normalize_topic_tags(parts, limit=12)
+
+
+def build_segment_inputs(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for segment in segments:
+        start_seconds = float(segment.get("start_seconds", segment.get("from", 0)) or 0)
+        end_seconds = float(segment.get("end_seconds", segment.get("to", start_seconds)) or start_seconds)
+        content = str(segment.get("content") or "").strip()
+        if not content:
+            continue
+        items.append(
+            {
+                "from": start_seconds,
+                "to": end_seconds,
+                "content": content,
+            }
+        )
+    return items
