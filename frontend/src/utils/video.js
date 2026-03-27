@@ -10,6 +10,13 @@ const STATUS_LABELS = {
   done: "已完成",
   failed: "失败",
 };
+const SYNC_STATUS_LABELS = {
+  pending: "待处理",
+  processing: "处理中",
+  indexed: "已入库",
+  failed: "失败",
+  partial: "部分完成",
+};
 
 export function formatDuration(seconds) {
   const total = Number(seconds || 0);
@@ -48,6 +55,10 @@ export function actionLabelFromStatus(status) {
   return "开始处理";
 }
 
+export function syncStatusLabel(status) {
+  return SYNC_STATUS_LABELS[String(status || "").trim()] || String(status || "待处理");
+}
+
 export function normalizeCoverUrl(url) {
   const raw = String(url || "").trim();
   if (!raw) {
@@ -74,6 +85,80 @@ export function openVideoLink(video) {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
+function normalizeSearchText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenizeSearchQuery(query) {
+  const normalized = normalizeSearchText(query);
+  if (!normalized) {
+    return [];
+  }
+  return normalized.split(/[\s,，、]+/).filter(Boolean);
+}
+
+export function searchVideos(videos, query, options = {}) {
+  const normalizedQuery = normalizeSearchText(query);
+  if (!normalizedQuery) {
+    return [];
+  }
+
+  const limit = Number(options.limit || 0) > 0 ? Number(options.limit) : Number.POSITIVE_INFINITY;
+  const tokens = tokenizeSearchQuery(normalizedQuery);
+
+  return (videos || [])
+    .map((video, index) => {
+      const title = normalizeSearchText(video?.title);
+      const upName = normalizeSearchText(video?.up_name);
+      const tags = normalizeSearchText(Array.isArray(video?.manual_tags) ? video.manual_tags.join(" ") : "");
+      const bvid = normalizeSearchText(video?.bvid);
+
+      let score = 0;
+      if (title.includes(normalizedQuery)) score += 120;
+      if (upName.includes(normalizedQuery)) score += 48;
+      if (tags.includes(normalizedQuery)) score += 72;
+      if (bvid.includes(normalizedQuery)) score += 56;
+
+      for (const token of tokens) {
+        let matched = false;
+        if (title.includes(token)) {
+          score += title.startsWith(token) ? 34 : 24;
+          matched = true;
+        }
+        if (tags.includes(token)) {
+          score += 18;
+          matched = true;
+        }
+        if (upName.includes(token)) {
+          score += 14;
+          matched = true;
+        }
+        if (bvid.includes(token)) {
+          score += 12;
+          matched = true;
+        }
+        if (!matched) {
+          score = 0;
+          break;
+        }
+      }
+
+      return { index, score, video };
+    })
+    .filter((item) => item.score > 0)
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      return left.index - right.index;
+    })
+    .slice(0, limit)
+    .map((item) => item.video);
+}
+
 export function decorateVideo(video) {
   return {
     ...video,
@@ -89,6 +174,7 @@ export function decorateVideo(video) {
     steps: buildStepItems(video.pipeline),
     processActionLabel: actionLabelFromStatus(video.sync_status),
     processBusy: false,
+    resetBusy: false,
   };
 }
 
@@ -156,6 +242,7 @@ export function summaryStateLabel(video) {
 }
 
 export function applyProcessStatus(video, status, fallbackMaxVideoMinutes) {
+  const operation = status.operation || null;
   video.sync_status = status.overall_status;
   video.chunk_count = Number(status.chunk_count || 0);
   video.error_msg = status.error_msg || "";
@@ -164,12 +251,43 @@ export function applyProcessStatus(video, status, fallbackMaxVideoMinutes) {
   video.transcript_updated_at = status.transcript_updated_at || "";
   video.has_summary = Boolean(status.has_summary);
   video.summary_updated_at = status.summary_updated_at || "";
+  video.audio_storage_provider = status.audio_storage_provider || video.audio_storage_provider || null;
+  video.audio_object_key = status.audio_object_key || video.audio_object_key || null;
   video.manual_tags = Array.isArray(status.manual_tags) ? status.manual_tags : [];
   video.manualTagsInput = video.manual_tags.join(", ");
   video.steps = Array.isArray(status.steps) ? status.steps : video.steps;
   video.processActionLabel = status.action_label || "开始处理";
   video.over_limit = Boolean(status.over_limit);
   video.max_video_minutes = Number(status.max_video_minutes || fallbackMaxVideoMinutes);
+  video.processBusy = Boolean(status.running && operation === "process");
+  video.resetBusy = Boolean(status.reset_running || (status.running && operation === "reset"));
+}
+
+export function resetVideoProcessState(video, fallbackMaxVideoMinutes) {
+  const hasRetainedAudio = Boolean(video.audio_storage_provider && video.audio_object_key);
+  video.sync_status = "pending";
+  video.chunk_count = 0;
+  video.error_msg = "";
+  video.transcript_source = "未转写";
+  video.transcript_segment_count = 0;
+  video.transcript_updated_at = "";
+  video.has_summary = false;
+  video.summary_updated_at = "";
+  video.steps = buildStepItems(
+    hasRetainedAudio
+      ? {
+          audio: {
+            status: "done",
+            status_label: STATUS_LABELS.done,
+          },
+        }
+      : {}
+  );
+  video.processActionLabel = actionLabelFromStatus("pending");
+  video.processBusy = false;
+  video.resetBusy = false;
+  video.summaryBusy = false;
+  video.max_video_minutes = Number(video.max_video_minutes || fallbackMaxVideoMinutes);
 }
 
 export function videoTone(video) {

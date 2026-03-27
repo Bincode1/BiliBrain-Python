@@ -3,13 +3,15 @@
     <div class="side-card-head">
       <div>
         <div class="side-card-label">对话</div>
-        <h3>会话列表</h3>
       </div>
-      <button class="ghost-button small" type="button" @click="store.createConversation">新建</button>
+      <button class="ghost-button small" type="button" @click="store.createConversation">新会话</button>
     </div>
     <div class="conversation-side-list">
       <div v-if="chatConversationsLoading" class="conversation-popover-empty">正在读取会话...</div>
-      <div v-else-if="!chatConversations.length" class="conversation-popover-empty">还没有会话。</div>
+      <div v-else-if="!chatConversations.length" class="conversation-popover-empty conversation-empty-card">
+        <strong>还没有会话</strong>
+        <p>直接发送第一条消息就会自动创建。</p>
+      </div>
       <div v-else class="conversation-popover-list">
         <article
           v-for="(conversation, index) in chatConversations"
@@ -25,6 +27,7 @@
             @click="handleSelect(conversation.conversation_id)"
           >
             <span class="conversation-title">{{ conversationShortLabel(conversation, index) }}</span>
+            <span class="conversation-meta">{{ conversation.message_count }} 条消息</span>
           </button>
           <button
             class="conversation-actions-trigger"

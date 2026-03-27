@@ -15,9 +15,14 @@ import {
   decorateVideo,
   firstSelectableVideo,
   hasTranscript,
+  resetVideoProcessState,
 } from "@/utils/video";
 
 export const useWorkspaceStore = defineStore("workspace", () => {
+  const SCOPE_VIDEO = "video";
+  const SCOPE_FOLDER = "folder";
+  const SCOPE_GLOBAL = "global";
+
   const sessionStatus = createStatus();
   const syncStatus = createStatus();
   const chatStatus = createStatus();
@@ -30,8 +35,12 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   const selectedFolderId = ref("");
   const selectedVideoBvid = ref("");
   const chatInput = ref("");
-  const chatScopeMode = ref("video");
+  const chatMode = ref("rag");
+  const deepResearchEnabled = ref(false);
+  const skillAgentPendingApproval = ref(null);
+  const chatScopeMode = ref(SCOPE_FOLDER);
   const chatScopeFolderId = ref("");
+  const chatScopeVideoBvid = ref("");
   const activeConversationId = ref(null);
   const chatConversations = ref([]);
   const chatMessages = ref([]);
@@ -65,24 +74,88 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     summary: { loading: false, text: "", meta: "", error: "", loadedBvid: "" },
     transcript: { loading: false, text: "", meta: "", error: "", loadedBvid: "" },
   });
+  const folderSearchOpen = ref(false);
+  const folderSearchFolderId = ref("");
+  const folderSearchQuery = ref("");
+  const folderSearchLoading = ref(false);
+  const folderSearchError = ref("");
+  const folderSearchResults = ref([]);
+  const folderSearchTotal = ref(0);
+  const folderSearchSearched = ref(false);
 
   let qrPollTimer = null;
   const processPollers = new Map();
   let chatStreamEl = null;
   let dialogResolver = null;
 
+  const STORAGE_KEY = "bilibrain_workspace_state";
+
+  function loadPersistedState() {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const state = JSON.parse(saved);
+        if (state.chatScopeMode) chatScopeMode.value = state.chatScopeMode;
+        if (state.chatMode) chatMode.value = state.chatMode;
+        if (typeof state.deepResearchEnabled === "boolean") deepResearchEnabled.value = state.deepResearchEnabled;
+        if (state.chatScopeFolderId) chatScopeFolderId.value = state.chatScopeFolderId;
+        if (state.chatScopeVideoBvid) chatScopeVideoBvid.value = state.chatScopeVideoBvid;
+        if (state.selectedFolderId) selectedFolderId.value = state.selectedFolderId;
+        if (state.selectedVideoBvid) selectedVideoBvid.value = state.selectedVideoBvid;
+      }
+    } catch (e) {
+      // ignore parse errors
+    }
+  }
+
+  function savePersistedState() {
+    try {
+      const state = {
+        chatScopeMode: chatScopeMode.value,
+        chatMode: chatMode.value,
+        deepResearchEnabled: deepResearchEnabled.value,
+        chatScopeFolderId: chatScopeFolderId.value,
+        chatScopeVideoBvid: chatScopeVideoBvid.value,
+        selectedFolderId: selectedFolderId.value,
+        selectedVideoBvid: selectedVideoBvid.value,
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch (e) {
+      // ignore storage errors
+    }
+  }
+
+  watch(chatScopeMode, savePersistedState);
+  watch(chatMode, savePersistedState);
+  watch(deepResearchEnabled, savePersistedState);
+  watch(chatScopeFolderId, savePersistedState);
+  watch(chatScopeVideoBvid, savePersistedState);
+  watch(selectedFolderId, savePersistedState);
+  watch(selectedVideoBvid, savePersistedState);
+
+  loadPersistedState();
+
   const selectedFolder = computed(() => folders.value.find((folder) => String(folder.folder_id) === String(selectedFolderId.value)) || null);
   const selectedVideo = computed(() => selectedFolder.value?.videos.find((video) => video.bvid === selectedVideoBvid.value) || null);
   const selectedChatFolder = computed(() => folders.value.find((folder) => String(folder.folder_id) === String(chatScopeFolderId.value)) || null);
+  const selectedChatVideo = computed(() => selectedChatFolder.value?.videos.find((video) => video.bvid === chatScopeVideoBvid.value) || null);
+  const chatScopeVideos = computed(() => (selectedChatFolder.value?.videos || []).filter((video) => !video.is_invalid));
+  const folderSearchFolder = computed(() => findFolder(folderSearchFolderId.value));
   const selectedConversation = computed(() =>
     chatConversations.value.find((item) => Number(item.conversation_id) === Number(activeConversationId.value)) || null
   );
   const activeDocumentPane = computed(() => documentViewerPanes[documentViewerMode.value] || documentViewerPanes.summary);
   const chatPlaceholder = computed(() => {
-    if (chatScopeMode.value === "video") {
-      return "例如：总结一下这个视频的核心要点，或者问某个细节。";
+    if (chatMode.value === "skill_agent") {
+      return "例如：先激活 workspace-coding，然后帮我整理当前工作区并执行一次验证。";
     }
-    if (chatScopeMode.value === "folder") {
+    if (deepResearchEnabled.value) {
+      return "例如：系统研究 LangGraph 的核心机制、最佳实践，并给出详细学习路径。";
+    }
+    if (chatScopeMode.value === SCOPE_VIDEO) {
+      return "例如：这个视频里讲的新乡路线怎么安排，预算大概多少？";
+    }
+    if (chatScopeMode.value === SCOPE_FOLDER) {
       return "例如：请帮我梳理这个收藏夹里 Django 的学习路线。";
     }
     return "例如：哪些已入库视频提到 LangGraph，或者整体都在讲什么？";
@@ -115,12 +188,102 @@ export const useWorkspaceStore = defineStore("workspace", () => {
 
   function findVideoByBvid(bvid) {
     for (const folder of folders.value) {
-      const video = (folder.videos || []).find((item) => item.bvid === bvid);
+      if (!folder.videos) continue;
+      const video = folder.videos.find((item) => item.bvid === bvid);
       if (video) {
         return video;
       }
     }
     return null;
+  }
+
+  function syncSelectedVideoForFolder(folder) {
+    if (!folder) {
+      selectedVideoBvid.value = "";
+      return;
+    }
+    const currentVideoExists = folder.videos.some((video) => video.bvid === selectedVideoBvid.value && !video.is_invalid);
+    if (currentVideoExists) {
+      return;
+    }
+    const selectable = firstSelectableVideo(folder.videos);
+    selectedVideoBvid.value = selectable ? selectable.bvid : "";
+  }
+
+  async function ensureChatScopeSelection(folderId, options = {}) {
+    const {
+      loadVideos = false,
+      autoSelectVideo = false,
+    } = options;
+    const folder = findFolder(folderId);
+    if (!folder) {
+      chatScopeVideoBvid.value = "";
+      return null;
+    }
+    if (loadVideos) {
+      try {
+        await ensureFolderVideos(folder);
+      } catch (error) {
+        return folder;
+      }
+    }
+    const videos = (folder.videos || []).filter((video) => !video.is_invalid);
+    const videoExists = videos.some((video) => video.bvid === chatScopeVideoBvid.value);
+    if (!videoExists) {
+      chatScopeVideoBvid.value = autoSelectVideo ? (videos[0]?.bvid || "") : "";
+    }
+    return folder;
+  }
+
+  async function setChatScopeRoot(mode) {
+    chatScopeMode.value = mode;
+    if (mode === SCOPE_GLOBAL) {
+      return;
+    }
+    chatScopeVideoBvid.value = "";
+    if (!chatScopeFolderId.value && folders.value.length) {
+      chatScopeFolderId.value = String(folders.value[0].folder_id);
+    }
+    if (chatScopeFolderId.value) {
+      await ensureChatScopeSelection(chatScopeFolderId.value, {
+        loadVideos: true,
+        autoSelectVideo: false,
+      });
+    }
+  }
+
+  async function setChatScopeFolder(folderId) {
+    const normalizedFolderId = String(folderId || "").trim();
+    chatScopeFolderId.value = normalizedFolderId;
+    chatScopeMode.value = SCOPE_FOLDER;
+    if (!normalizedFolderId) {
+      chatScopeVideoBvid.value = "";
+      return;
+    }
+    await ensureChatScopeSelection(normalizedFolderId, {
+      loadVideos: true,
+      autoSelectVideo: false,
+    });
+  }
+
+  async function setChatScopeTarget(targetBvid) {
+    const normalizedBvid = String(targetBvid || "").trim();
+    if (!chatScopeFolderId.value) {
+      chatScopeVideoBvid.value = "";
+      chatScopeMode.value = SCOPE_FOLDER;
+      return;
+    }
+    await ensureChatScopeSelection(chatScopeFolderId.value, {
+      loadVideos: true,
+      autoSelectVideo: false,
+    });
+    if (!normalizedBvid) {
+      chatScopeVideoBvid.value = "";
+      chatScopeMode.value = SCOPE_FOLDER;
+      return;
+    }
+    chatScopeVideoBvid.value = normalizedBvid;
+    chatScopeMode.value = SCOPE_VIDEO;
   }
 
   function stopProcessPoller(bvid) {
@@ -132,9 +295,15 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   }
 
   function stopAllPollers() {
-    for (const bvid of processPollers.keys()) {
-      stopProcessPoller(bvid);
-    }
+    processPollers.forEach((timer) => clearInterval(timer));
+    processPollers.clear();
+  }
+
+  function resetChatStateOnLogout() {
+    activeConversationId.value = null;
+    chatConversations.value = [];
+    chatMessages.value = [];
+    skillAgentPendingApproval.value = null;
   }
 
   function resetDocumentPane(kind) {
@@ -145,8 +314,72 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     documentViewerPanes[kind].loadedBvid = "";
   }
 
+  function snapshotVideoState(video) {
+    return {
+      ...video,
+      manual_tags: Array.isArray(video.manual_tags) ? [...video.manual_tags] : [],
+      steps: Array.isArray(video.steps) ? video.steps.map((step) => ({ ...step })) : [],
+    };
+  }
+
+  function restoreVideoState(video, snapshot) {
+    Object.assign(video, {
+      ...snapshot,
+      manual_tags: Array.isArray(snapshot.manual_tags) ? [...snapshot.manual_tags] : [],
+      steps: Array.isArray(snapshot.steps) ? snapshot.steps.map((step) => ({ ...step })) : [],
+    });
+  }
+
+  function snapshotDocumentViewer() {
+    return {
+      open: documentViewerOpen.value,
+      mode: documentViewerMode.value,
+      videoBvid: documentViewerVideoBvid.value,
+      title: documentViewerTitle.value,
+      panes: {
+        summary: { ...documentViewerPanes.summary },
+        transcript: { ...documentViewerPanes.transcript },
+      },
+    };
+  }
+
+  function restoreDocumentViewer(snapshot) {
+    if (!snapshot) {
+      return;
+    }
+    documentViewerOpen.value = snapshot.open;
+    documentViewerMode.value = snapshot.mode;
+    documentViewerVideoBvid.value = snapshot.videoBvid;
+    documentViewerTitle.value = snapshot.title;
+    Object.assign(documentViewerPanes.summary, snapshot.panes.summary);
+    Object.assign(documentViewerPanes.transcript, snapshot.panes.transcript);
+  }
+
+  function clearVideoArtifactsLocally(video) {
+    stopProcessPoller(video.bvid);
+    resetVideoProcessState(video, processingSettings.max_video_minutes);
+    if (documentViewerVideoBvid.value === video.bvid) {
+      closeDocumentViewer();
+      resetDocumentPane("summary");
+      resetDocumentPane("transcript");
+      documentViewerVideoBvid.value = "";
+      documentViewerTitle.value = "";
+    }
+  }
+
   function closeDocumentViewer() {
     documentViewerOpen.value = false;
+  }
+
+  function closeFolderSearch() {
+    folderSearchOpen.value = false;
+    folderSearchFolderId.value = "";
+    folderSearchQuery.value = "";
+    folderSearchLoading.value = false;
+    folderSearchError.value = "";
+    folderSearchResults.value = [];
+    folderSearchTotal.value = 0;
+    folderSearchSearched.value = false;
   }
 
   function openDialog(options = {}) {
@@ -239,7 +472,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   async function resetAllProcessedContent() {
     const confirmed = await confirmDialog({
       title: "重置全部已处理内容",
-      message: "这会清空所有已转写、已入库和音频缓存内容，但会保留收藏夹和视频元数据。",
+      message: "这会清空所有已转写、已摘要和已入库内容，但会保留音频缓存、收藏夹和视频元数据。",
       confirmLabel: "确认重置",
       cancelLabel: "取消",
       tone: "danger",
@@ -264,10 +497,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
           await openFolder(folder, true);
         }
       }
-      setStatus(
-        syncStatus,
-        `重置完成：${Number(data.video_count || 0)} 个视频，${Number(data.audio_file_count || 0)} 个音频缓存已清除。`
-      );
+      setStatus(syncStatus, `重置完成：${Number(data.video_count || 0)} 个视频的处理结果已清空，音频缓存已保留。`);
     } catch (error) {
       setStatus(syncStatus, error.message, true);
     }
@@ -287,9 +517,8 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         session.uid = "";
         folders.value = [];
         chatScopeFolderId.value = "";
-        activeConversationId.value = null;
-        chatConversations.value = [];
-        chatMessages.value = [];
+        closeFolderSearch();
+        resetChatStateOnLogout();
         setStatus(sessionStatus, "当前未登录。", true);
       }
     } catch (error) {
@@ -298,9 +527,8 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       session.uid = "";
       folders.value = [];
       chatScopeFolderId.value = "";
-      activeConversationId.value = null;
-      chatConversations.value = [];
-      chatMessages.value = [];
+      closeFolderSearch();
+      resetChatStateOnLogout();
       setStatus(sessionStatus, error.message, true);
     }
   }
@@ -352,21 +580,50 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     try {
       if (!session.loggedIn) {
         folders.value = [];
+        closeFolderSearch();
         return;
       }
       const query = session.uid ? `?uid=${encodeURIComponent(session.uid)}` : "";
       const data = await api(`/api/folders${query}`);
       folders.value = (data.folders || []).map(decorateFolder);
       setStatus(syncStatus, `已读取 ${folders.value.length} 个收藏夹。`);
-      if (chatScopeFolderId.value && !folders.value.some((folder) => String(folder.folder_id) === String(chatScopeFolderId.value))) {
+
+      const folderExists = (id) => folders.value.some((folder) => String(folder.folder_id) === String(id));
+      if (folderSearchFolderId.value && !folderExists(folderSearchFolderId.value)) {
+        closeFolderSearch();
+      }
+
+      if (chatScopeFolderId.value && !folderExists(chatScopeFolderId.value)) {
         chatScopeFolderId.value = "";
+        chatScopeVideoBvid.value = "";
       }
       if (!chatScopeFolderId.value && folders.value.length) {
         chatScopeFolderId.value = String(folders.value[0].folder_id);
       }
+
+      if (selectedFolderId.value && !folderExists(selectedFolderId.value)) {
+        selectedFolderId.value = "";
+        selectedVideoBvid.value = "";
+      }
+      if (selectedFolderId.value && folderExists(selectedFolderId.value)) {
+        const folder = folders.value.find((f) => String(f.folder_id) === String(selectedFolderId.value));
+        if (folder) {
+          const videoExists = folder.videos.some((v) => v.bvid === selectedVideoBvid.value);
+          if (!videoExists) {
+            selectedVideoBvid.value = "";
+          }
+          await openFolder(folder, true);
+        }
+      }
       if (!selectedFolderId.value && folders.value.length) {
-        openFolder(folders.value[0], true).catch((error) => {
+        await openFolder(folders.value[0], true).catch((error) => {
           setStatus(syncStatus, error.message, true);
+        });
+      }
+      if (chatScopeFolderId.value) {
+        await ensureChatScopeSelection(chatScopeFolderId.value, {
+          loadVideos: true,
+          autoSelectVideo: chatScopeMode.value === SCOPE_VIDEO,
         });
       }
     } catch (error) {
@@ -381,9 +638,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     } = options;
 
     if (!session.loggedIn) {
-      activeConversationId.value = null;
-      chatConversations.value = [];
-      chatMessages.value = [];
+      resetChatStateOnLogout();
       return;
     }
 
@@ -417,6 +672,12 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     }
   }
 
+  function syncActiveConversationId(conversations, preferredConversationId = null, fallbackActiveConversationId = null) {
+    const preferredId = preferredConversationId ?? fallbackActiveConversationId ?? null;
+    const exists = conversations.some((item) => Number(item.conversation_id) === Number(preferredId));
+    activeConversationId.value = exists ? Number(preferredId) : (conversations[0]?.conversation_id || null);
+  }
+
   async function loadChatConversations(preferredConversationId = null, options = {}) {
     const {
       historyShowLoading = true,
@@ -424,9 +685,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     } = options;
 
     if (!session.loggedIn) {
-      activeConversationId.value = null;
-      chatConversations.value = [];
-      chatMessages.value = [];
+      resetChatStateOnLogout();
       return;
     }
 
@@ -436,33 +695,138 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       chatConversations.value = Array.isArray(data.conversations)
         ? data.conversations.map(normalizeConversation)
         : [];
-
-      const preferredId = preferredConversationId ?? activeConversationId.value ?? data.active_conversation_id ?? null;
-      const exists = chatConversations.value.some((item) => Number(item.conversation_id) === Number(preferredId));
-      activeConversationId.value = exists ? Number(preferredId) : (chatConversations.value[0]?.conversation_id || null);
+      syncActiveConversationId(chatConversations.value, preferredConversationId, activeConversationId.value ?? data.active_conversation_id ?? null);
       await loadChatHistory({
         showLoading: historyShowLoading,
         scrollToBottomOnLoad: historyScrollToBottomOnLoad,
       });
     } catch (error) {
-      activeConversationId.value = null;
-      chatConversations.value = [];
-      chatMessages.value = [];
+      resetChatStateOnLogout();
       setStatus(chatStatus, error.message, true);
     } finally {
       chatConversationsLoading.value = false;
     }
   }
 
+  async function refreshConversationListOnly(preferredConversationId = null) {
+    if (!session.loggedIn) {
+      return;
+    }
+    try {
+      const data = await api("/api/chat/conversations");
+      chatConversations.value = Array.isArray(data.conversations)
+        ? data.conversations.map(normalizeConversation)
+        : [];
+      syncActiveConversationId(chatConversations.value, preferredConversationId, activeConversationId.value ?? data.active_conversation_id ?? null);
+    } catch (error) {
+      setStatus(chatStatus, error.message, true);
+    }
+  }
+
+  function initializeSkillAgentMessage(message) {
+    message.text = "";
+    message.sources = [];
+    message.answer_mode = null;
+    message.route_mode = null;
+    message.agent_status = "技能代理正在规划并执行...";
+    message.tool_events = [];
+    message.skill_events = [];
+    message.active_skills = [];
+  }
+
+  function initializeResearchMessage(message) {
+    message.sources = [];
+    message.answer_mode = "research";
+    message.route_mode = "research";
+    message.agent_status = "深度研究正在准备中...";
+    message.agent_events = [];
+    message.research_plan = null;
+  }
+
+  function pushSkillAgentActivity(message, field, item) {
+    if (!Array.isArray(message[field])) {
+      message[field] = [];
+    }
+    message[field].push({
+      ...item,
+      _id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    });
+  }
+
+  async function consumeSkillAgentStream(response, assistantMessage) {
+    const dataType = response.headers.get("content-type") || "";
+    if (!response.ok || !dataType.includes("text/event-stream")) {
+      const raw = await response.text();
+      throw new Error(raw || "技能代理请求失败");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let answerStarted = false;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const { frames, rest } = parseSseFrames(buffer);
+      buffer = rest;
+
+      for (const frame of frames) {
+        if (!frame.trim()) {
+          continue;
+        }
+        const { event, data } = parseSseEvent(frame);
+        if (event === "conversation") {
+          activeConversationId.value = data.conversation_id || null;
+        } else if (event === "status") {
+          assistantMessage.agent_status = data.delta || "";
+          scrollChatToBottom();
+        } else if (event === "skill") {
+          pushSkillAgentActivity(assistantMessage, "skill_events", data);
+          scrollChatToBottom();
+        } else if (event === "tool") {
+          pushSkillAgentActivity(assistantMessage, "tool_events", data);
+          scrollChatToBottom();
+        } else if (event === "skills") {
+          assistantMessage.active_skills = Array.isArray(data.active_skills) ? data.active_skills : [];
+          scrollChatToBottom();
+        } else if (event === "approval") {
+          skillAgentPendingApproval.value = {
+            conversationId: activeConversationId.value || null,
+            sessionId: data.session_id || `conversation-${activeConversationId.value || ""}`,
+            workspaceId: data.workspace_id || "",
+            approvalRequest: data.approval_request || null,
+          };
+          assistantMessage.agent_status = "等待你审批后继续执行。";
+          if (!assistantMessage.text) {
+            assistantMessage.text = "等待你审批后继续执行。";
+          }
+          scrollChatToBottom();
+        } else if (event === "answer") {
+          skillAgentPendingApproval.value = null;
+          if (!answerStarted) {
+            assistantMessage.text = data.delta || "";
+            answerStarted = true;
+          } else {
+            assistantMessage.text += data.delta || "";
+          }
+          scrollChatToBottom();
+        } else if (event === "error") {
+          throw new Error(data.detail || "技能代理流式执行失败");
+        }
+      }
+    }
+  }
+
   async function createConversation() {
     clearStatus(chatStatus);
     try {
-      const scopeFolderId = chatScopeMode.value === "folder" && selectedChatFolder.value
-        ? Number(selectedChatFolder.value.folder_id)
-        : null;
       const data = await api("/api/chat/conversations", {
         method: "POST",
-        body: JSON.stringify({ folder_id: scopeFolderId }),
+        body: JSON.stringify({}),
       });
       const conversation = normalizeConversation(data.conversation || {});
       activeConversationId.value = conversation.conversation_id;
@@ -588,19 +952,13 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     }
   }
 
-  async function openFolder(folder, force = false) {
-    if (!force && folder.expanded) {
-      folder.expanded = false;
-      return;
+  async function ensureFolderVideos(folder, options = {}) {
+    const { force = false } = options;
+    if (!folder) {
+      return [];
     }
-    folder.expanded = true;
-    selectedFolderId.value = String(folder.folder_id);
     if (folder.videos.length && !force) {
-      const selectable = firstSelectableVideo(folder.videos);
-      if (!selectedVideoBvid.value && selectable) {
-        selectedVideoBvid.value = selectable.bvid;
-      }
-      return;
+      return folder.videos;
     }
     folder.loadingVideos = true;
     folder.videoError = "";
@@ -608,15 +966,42 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       const data = await api(`/api/folders/${folder.folder_id}/videos`);
       folder.fields = data.fields || [];
       folder.videos = (data.videos || []).map(decorateVideo);
-      const selectable = firstSelectableVideo(folder.videos);
-      if (selectable) {
-        selectedVideoBvid.value = selectable.bvid;
-      }
+      return folder.videos;
     } catch (error) {
       folder.videoError = error.message;
+      throw error;
     } finally {
       folder.loadingVideos = false;
     }
+  }
+
+  async function openFolder(folder, force = false) {
+    folder.expanded = true;
+    selectedFolderId.value = String(folder.folder_id);
+    if (folder.videos.length && !force) {
+      syncSelectedVideoForFolder(folder);
+      return;
+    }
+    try {
+      await ensureFolderVideos(folder, { force });
+      syncSelectedVideoForFolder(folder);
+    } catch (error) {
+      folder.videoError = error.message;
+    }
+  }
+
+  async function openFolderSearch(folder) {
+    if (!folder) {
+      return;
+    }
+    folderSearchOpen.value = true;
+    folderSearchFolderId.value = String(folder.folder_id);
+    folderSearchQuery.value = String(folder.title || "").trim();
+    folderSearchError.value = "";
+    folderSearchResults.value = [];
+    folderSearchTotal.value = 0;
+    folderSearchSearched.value = false;
+    await searchBiliVideosForFolder(folder.folder_id, folderSearchQuery.value);
   }
 
   function selectVideo(folder, video) {
@@ -625,6 +1010,45 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     }
     selectedFolderId.value = String(folder.folder_id);
     selectedVideoBvid.value = video.bvid;
+  }
+
+  async function searchBiliVideosForFolder(folderId = folderSearchFolderId.value, keyword = folderSearchQuery.value) {
+    const normalizedFolderId = Number(folderId || 0);
+    const normalizedKeyword = String(keyword || "").trim();
+    if (!normalizedFolderId) {
+      return;
+    }
+
+    folderSearchLoading.value = true;
+    folderSearchError.value = "";
+    folderSearchSearched.value = true;
+    try {
+      const params = new URLSearchParams();
+      if (normalizedKeyword) {
+        params.set("keyword", normalizedKeyword);
+      }
+      params.set("page", "1");
+      params.set("page_size", "12");
+      const query = params.size ? `?${params.toString()}` : "";
+      const data = await api(`/api/folders/${normalizedFolderId}/bili-search${query}`);
+      folderSearchQuery.value = data.keyword || normalizedKeyword;
+      folderSearchResults.value = Array.isArray(data.results) ? data.results : [];
+      folderSearchTotal.value = Number(data.total || folderSearchResults.value.length || 0);
+    } catch (error) {
+      folderSearchResults.value = [];
+      folderSearchTotal.value = 0;
+      folderSearchError.value = error.message;
+    } finally {
+      folderSearchLoading.value = false;
+    }
+  }
+
+  function openFolderSearchResult(video) {
+    const url = String(video?.watch_url || "");
+    if (!url) {
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
   }
 
   async function loadDocumentPane(kind, video, options = {}) {
@@ -713,6 +1137,8 @@ export const useWorkspaceStore = defineStore("workspace", () => {
 
   function startProcessPoller(folderId, bvid) {
     stopProcessPoller(bvid);
+    let prevSignature = null;
+    let prevOperation = null;
     const timer = setInterval(async () => {
       try {
         const data = await api(`/api/videos/${encodeURIComponent(bvid)}/process/status`);
@@ -721,10 +1147,33 @@ export const useWorkspaceStore = defineStore("workspace", () => {
           stopProcessPoller(bvid);
           return;
         }
-        applyProcessStatus(video, data, processingSettings.max_video_minutes);
+        const signature = JSON.stringify({
+          running: Boolean(data.running),
+          operation: data.operation || "",
+          queueStatus: data.queue_status || "",
+          resetStatus: data.reset_status || "",
+          overallStatus: data.overall_status || "",
+          errorMsg: data.error_msg || "",
+          chunkCount: Number(data.chunk_count || 0),
+          transcriptSegments: Number(data.transcript_segment_count || 0),
+          hasSummary: Boolean(data.has_summary),
+        });
+        if (signature !== prevSignature) {
+          prevSignature = signature;
+          applyProcessStatus(video, data, processingSettings.max_video_minutes);
+        }
+        prevOperation = data.operation || prevOperation;
         if (!data.running) {
           stopProcessPoller(bvid);
           video.processBusy = false;
+          video.resetBusy = false;
+          if (prevOperation === "reset") {
+            if (data.reset_status === "failed" && data.error_msg) {
+              setStatus(chatStatus, data.error_msg, true);
+            } else {
+              clearStatus(chatStatus);
+            }
+          }
           if (documentViewerOpen.value && documentViewerVideoBvid.value === video.bvid) {
             if (documentViewerPanes.transcript.loadedBvid === video.bvid && data.has_transcript) {
               await loadDocumentPane("transcript", video, { background: true, force: true });
@@ -739,6 +1188,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         const video = findVideo(folderId, bvid);
         if (video) {
           video.processBusy = false;
+          video.resetBusy = false;
         }
       }
     }, 2000);
@@ -748,7 +1198,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   async function processSelectedVideo() {
     const folder = selectedFolder.value;
     const video = selectedVideo.value;
-    if (!folder || !video) {
+    if (!folder || !video || video.processBusy || video.resetBusy || video.sync_status === "indexed") {
       return;
     }
     try {
@@ -767,21 +1217,29 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   }
 
   async function resetSelectedVideo() {
+    const folder = selectedFolder.value;
     const video = selectedVideo.value;
-    if (!video) {
+    if (!folder || !video || video.resetBusy) {
       return;
     }
+    const videoSnapshot = snapshotVideoState(video);
+    const viewerSnapshot = documentViewerVideoBvid.value === video.bvid ? snapshotDocumentViewer() : null;
+    video.resetBusy = true;
+    clearStatus(chatStatus);
+    clearVideoArtifactsLocally(video);
     try {
+      setStatus(chatStatus, "正在重置当前视频...");
       const data = await api(`/api/videos/${encodeURIComponent(video.bvid)}/reset`, { method: "POST" });
       applyProcessStatus(video, data, processingSettings.max_video_minutes);
-      if (documentViewerVideoBvid.value === video.bvid) {
-        closeDocumentViewer();
-        resetDocumentPane("summary");
-        resetDocumentPane("transcript");
-        documentViewerVideoBvid.value = "";
-        documentViewerTitle.value = "";
+      if (data.started || data.running || data.reset_running) {
+        startProcessPoller(folder.folder_id, video.bvid);
+      } else {
+        clearStatus(chatStatus);
       }
     } catch (error) {
+      restoreVideoState(video, videoSnapshot);
+      restoreDocumentViewer(viewerSnapshot);
+      video.resetBusy = false;
       setStatus(chatStatus, error.message, true);
     }
   }
@@ -814,23 +1272,38 @@ export const useWorkspaceStore = defineStore("workspace", () => {
 
     let scopeFolderId = null;
     let scopeBvid = null;
-    if (chatScopeMode.value === "video") {
-      if (!selectedVideo.value) {
-        setStatus(chatStatus, "请先在左侧选中一个视频，或切换到收藏夹 / 全部范围。", true);
-        return;
+    if (chatMode.value === "rag") {
+      if (chatScopeMode.value === SCOPE_VIDEO) {
+        if (!selectedChatFolder.value) {
+          setStatus(chatStatus, "请先选择一个收藏夹，再指定视频。", true);
+          return;
+        }
+        if (!selectedChatVideo.value) {
+          setStatus(chatStatus, "请先选择一个视频，或切换到整个收藏夹 / 全部已入库。", true);
+          return;
+        }
+        scopeFolderId = Number(selectedChatFolder.value.folder_id);
+        scopeBvid = selectedChatVideo.value.bvid;
+      } else if (chatScopeMode.value === SCOPE_FOLDER) {
+        if (!selectedChatFolder.value) {
+          setStatus(chatStatus, "请先选择一个收藏夹，或切换到其他范围。", true);
+          return;
+        }
+        scopeFolderId = Number(selectedChatFolder.value.folder_id);
       }
-      scopeFolderId = selectedFolder.value ? Number(selectedFolder.value.folder_id) : null;
-      scopeBvid = selectedVideo.value.bvid;
-    } else if (chatScopeMode.value === "folder") {
-      if (!selectedChatFolder.value) {
-        setStatus(chatStatus, "请先选择一个收藏夹，或切换到其他范围。", true);
-        return;
-      }
-      scopeFolderId = Number(selectedChatFolder.value.folder_id);
     }
 
     const assistantMessage = reactive(
-      normalizeChatMessage({ role: "assistant", text: "正在理解问题...", sources: [] }, activeConversationId.value)
+      normalizeChatMessage(
+        {
+          role: "assistant",
+          text: chatMode.value === "skill_agent"
+            ? "技能代理正在规划并执行..."
+            : (deepResearchEnabled.value ? "正在启动深度研究..." : "正在理解问题..."),
+          sources: [],
+        },
+        activeConversationId.value
+      )
     );
     chatMessages.value.push(normalizeChatMessage({ role: "user", text: query }, activeConversationId.value));
     chatMessages.value.push(assistantMessage);
@@ -838,74 +1311,110 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     scrollChatToBottom();
 
     try {
-      const response = await fetch("/api/ask/stream", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query,
-          folder_id: scopeFolderId,
-          bvid: scopeBvid,
-          scope_mode: chatScopeMode.value,
-          conversation_id: activeConversationId.value,
-        }),
-      });
-      const dataType = response.headers.get("content-type") || "";
-      if (!response.ok || !dataType.includes("text/event-stream")) {
-        const raw = await response.text();
-        throw new Error(raw || "问答请求失败");
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let answerStarted = false;
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) {
-          break;
+      if (chatMode.value === "skill_agent") {
+        initializeSkillAgentMessage(assistantMessage);
+        skillAgentPendingApproval.value = null;
+        const response = await fetch("/api/skill-agent/ask/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query,
+            conversation_id: activeConversationId.value,
+          }),
+        });
+        await consumeSkillAgentStream(response, assistantMessage);
+      } else {
+        if (deepResearchEnabled.value) {
+          initializeResearchMessage(assistantMessage);
         }
-        buffer += decoder.decode(value, { stream: true });
-        const { frames, rest } = parseSseFrames(buffer);
-        buffer = rest;
+        const response = await fetch("/api/ask/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query,
+            folder_id: scopeFolderId,
+            bvid: scopeBvid,
+            scope_mode: chatScopeMode.value,
+            conversation_id: activeConversationId.value,
+            deep_research: deepResearchEnabled.value,
+          }),
+        });
+        const dataType = response.headers.get("content-type") || "";
+        if (!response.ok || !dataType.includes("text/event-stream")) {
+          const raw = await response.text();
+          throw new Error(raw || "问答请求失败");
+        }
 
-        for (const frame of frames) {
-          if (!frame.trim()) {
-            continue;
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let answerStarted = false;
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) {
+            break;
           }
-          const { event, data } = parseSseEvent(frame);
-          if (event === "conversation") {
-            activeConversationId.value = data.conversation_id || null;
-          } else if (event === "route") {
-            assistantMessage.route_mode = data.route_mode || null;
-          } else if (event === "mode") {
-            assistantMessage.answer_mode = data.mode || null;
-          } else if (event === "status") {
-            assistantMessage.text = data.delta || "";
-            scrollChatToBottom();
-          } else if (event === "answer") {
-            if (!answerStarted) {
-              assistantMessage.text = data.delta || "";
-              answerStarted = true;
-            } else {
-              assistantMessage.text += data.delta || "";
+          buffer += decoder.decode(value, { stream: true });
+          const { frames, rest } = parseSseFrames(buffer);
+          buffer = rest;
+
+          for (const frame of frames) {
+            if (!frame.trim()) {
+              continue;
             }
-            scrollChatToBottom();
-          } else if (event === "sources") {
-            assistantMessage.sources = data.sources || [];
-            scrollChatToBottom();
-          } else if (event === "error") {
-            throw new Error(data.detail || "流式回答失败");
+            const { event, data } = parseSseEvent(frame);
+            if (event === "conversation") {
+              activeConversationId.value = data.conversation_id || null;
+            } else if (event === "route") {
+              assistantMessage.route_mode = data.route_mode || null;
+            } else if (event === "mode") {
+              assistantMessage.answer_mode = data.mode || null;
+            } else if (event === "research_plan") {
+              assistantMessage.research_plan = data || null;
+              scrollChatToBottom();
+            } else if (event === "agent") {
+              pushSkillAgentActivity(assistantMessage, "agent_events", data);
+              scrollChatToBottom();
+            } else if (event === "status") {
+              assistantMessage.agent_status = data.delta || "";
+              if (!answerStarted) {
+                assistantMessage.text = data.delta || "";
+              }
+              scrollChatToBottom();
+            } else if (event === "answer") {
+              if (!answerStarted) {
+                assistantMessage.text = data.delta || "";
+                answerStarted = true;
+              } else {
+                assistantMessage.text += data.delta || "";
+              }
+              scrollChatToBottom();
+            } else if (event === "sources") {
+              assistantMessage.sources = data.sources || [];
+              scrollChatToBottom();
+            } else if (event === "error") {
+              throw new Error(data.detail || "流式回答失败");
+            }
           }
         }
       }
-      await loadChatConversations(activeConversationId.value, {
-        historyShowLoading: false,
-        historyScrollToBottomOnLoad: true,
-      });
+      if (chatMode.value === "skill_agent") {
+        await refreshConversationListOnly(activeConversationId.value);
+      } else {
+        if (deepResearchEnabled.value) {
+          assistantMessage.agent_status = assistantMessage.agent_status || "深度研究已完成。";
+          await refreshConversationListOnly(activeConversationId.value);
+        } else {
+          await loadChatConversations(activeConversationId.value, {
+            historyShowLoading: false,
+            historyScrollToBottomOnLoad: true,
+          });
+        }
+      }
     } catch (error) {
       assistantMessage.text = error.message;
-      assistantMessage.answer_mode = assistantMessage.answer_mode || "chunk";
+      assistantMessage.answer_mode = assistantMessage.answer_mode || (deepResearchEnabled.value ? "research" : "chunk");
       assistantMessage.sources = [];
       setStatus(chatStatus, error.message, true);
       scrollChatToBottom();
@@ -937,6 +1446,64 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     clearStatus(chatStatus);
   });
 
+  watch(chatScopeFolderId, (nextFolderId) => {
+    if (!nextFolderId) {
+      chatScopeVideoBvid.value = "";
+      return;
+    }
+    const folder = findFolder(nextFolderId);
+    if (!folder) {
+      chatScopeVideoBvid.value = "";
+      return;
+    }
+    const hasCurrentVideo = (folder.videos || []).some((video) => video.bvid === chatScopeVideoBvid.value && !video.is_invalid);
+    if (!hasCurrentVideo && chatScopeMode.value !== SCOPE_VIDEO) {
+      chatScopeVideoBvid.value = "";
+    }
+  });
+
+  watch(chatMode, () => {
+    clearStatus(chatStatus);
+    skillAgentPendingApproval.value = null;
+  });
+
+  async function resumeSkillAgentApproval(decision) {
+    if (!skillAgentPendingApproval.value?.sessionId) {
+      setStatus(chatStatus, "当前没有待审批的技能代理操作。", true);
+      return;
+    }
+    try {
+      clearStatus(chatStatus);
+      const assistantMessage = reactive(
+        normalizeChatMessage(
+          {
+            role: "assistant",
+            text: "",
+            sources: [],
+          },
+          activeConversationId.value
+        )
+      );
+      initializeSkillAgentMessage(assistantMessage);
+      chatMessages.value.push(assistantMessage);
+      scrollChatToBottom();
+      const response = await fetch("/api/skill-agent/resume/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conversation_id: skillAgentPendingApproval.value.conversationId,
+          session_id: skillAgentPendingApproval.value.sessionId,
+          decision,
+        }),
+      });
+      skillAgentPendingApproval.value = null;
+      await consumeSkillAgentStream(response, assistantMessage);
+      await refreshConversationListOnly(activeConversationId.value);
+    } catch (error) {
+      setStatus(chatStatus, error.message, true);
+    }
+  }
+
   return {
     sessionStatus,
     syncStatus,
@@ -949,8 +1516,12 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     selectedFolderId,
     selectedVideoBvid,
     chatInput,
+    chatMode,
+    deepResearchEnabled,
+    skillAgentPendingApproval,
     chatScopeMode,
     chatScopeFolderId,
+    chatScopeVideoBvid,
     activeConversationId,
     chatConversations,
     chatMessages,
@@ -964,6 +1535,13 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     documentViewerMode,
     documentViewerVideoBvid,
     documentViewerTitle,
+    folderSearchOpen,
+    folderSearchFolderId,
+    folderSearchQuery,
+    folderSearchLoading,
+    folderSearchError,
+    folderSearchTotal,
+    folderSearchSearched,
     dialogOpen,
     dialogMode,
     dialogTitle,
@@ -977,6 +1555,10 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     selectedFolder,
     selectedVideo,
     selectedChatFolder,
+    selectedChatVideo,
+    chatScopeVideos,
+    folderSearchFolder,
+    folderSearchResults,
     selectedConversation,
     activeDocumentPane,
     chatPlaceholder,
@@ -984,6 +1566,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     toggleMessageSources,
     closeQrModal,
     closeDocumentViewer,
+    closeFolderSearch,
     closeDialog,
     loadSettings,
     saveSettings,
@@ -998,8 +1581,14 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     deleteConversation,
     renameConversation,
     syncFolder,
+    openFolderSearch,
+    searchBiliVideosForFolder,
     openFolder,
     selectVideo,
+    setChatScopeRoot,
+    setChatScopeFolder,
+    setChatScopeTarget,
+    openFolderSearchResult,
     loadDocumentPane,
     openDocumentViewer,
     switchDocumentViewerMode,
@@ -1008,6 +1597,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     resetSelectedVideo,
     saveSelectedVideoTags,
     askQuestion,
+    resumeSkillAgentApproval,
     initialize,
     cleanup,
   };
