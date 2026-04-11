@@ -1,0 +1,25 @@
+/* ---- Base resets ---- */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  color: var(--foreground);
+  font-family: var(--font-body);
+  background: var(--background);
+  font-feature-settings: "kern" 1;
+  font-kerning: normal;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}

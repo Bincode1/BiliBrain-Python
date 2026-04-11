@@ -1,18 +1,19 @@
 <template>
-  <section class="panel chat-panel">
-    <div class="chat-layout">
-      <div class="chat-main-column">
-        <SkillApprovalBar />
+  <section class="grid h-full grid-rows-[1fr_auto]">
+    <!-- Messages area (scrollable, fills remaining space) -->
+    <div class="min-h-0 flex flex-col overflow-hidden flex-1">
+      <ChatMessages />
 
-        <div :class="statusClass(chatStatus)">{{ chatStatus.message }}</div>
+      <div v-if="chatStatus.show" :class="['mx-auto max-w-3xl px-4 shrink-0 rounded-lg px-3 py-1.5 text-xs', chatStatus.error ? 'bg-destructive/10 text-destructive' : 'bg-muted text-muted-foreground']">
+        {{ chatStatus.message }}
+      </div>
+    </div>
 
-        <ChatMessages />
+    <!-- Composer (always pinned at bottom) -->
+    <div class="flex justify-center px-4 pb-4 pt-2">
+      <div class="w-full max-w-3xl">
         <ChatComposer :folder-only="folderOnly" />
       </div>
-
-      <aside class="chat-side-column">
-        <ConversationListCard />
-      </aside>
     </div>
   </section>
 </template>
@@ -20,20 +21,14 @@
 <script setup>
 import { storeToRefs } from "pinia";
 
-import { statusClass } from "@/composables/useStatus";
 import ChatComposer from "@/components/chat/ChatComposer.vue";
 import ChatMessages from "@/components/chat/ChatMessages.vue";
-import ConversationListCard from "@/components/chat/ConversationListCard.vue";
-import SkillApprovalBar from "@/components/chat/SkillApprovalBar.vue";
-import { useWorkspaceStore } from "@/stores/workspace";
+import { useChatStore } from "@/stores/chat";
 
 defineProps({
-  folderOnly: {
-    type: Boolean,
-    default: false,
-  },
+  folderOnly: { type: Boolean, default: false },
 });
 
-const store = useWorkspaceStore();
+const store = useChatStore();
 const { chatStatus } = storeToRefs(store);
 </script>

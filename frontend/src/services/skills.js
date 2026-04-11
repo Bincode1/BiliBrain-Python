@@ -2,9 +2,6 @@ import { api } from "@/services/http";
 
 export function listSkills(params = {}) {
   const search = new URLSearchParams();
-  if (params.sessionId) {
-    search.set("session_id", params.sessionId);
-  }
   if (params.reload) {
     search.set("reload", "true");
   }
@@ -19,6 +16,20 @@ export function activateSkill(payload) {
   });
 }
 
-export function getSkillSession(sessionId) {
-  return api(`/api/skills/sessions/${encodeURIComponent(sessionId)}`);
+export function getSkill(name) {
+  return api(`/api/skills/${encodeURIComponent(name)}`);
+}
+
+export function deactivateSkill(payload) {
+  return api("/api/skills/deactivate", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createSkill(payload) {
+  return api("/api/skills/create", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }

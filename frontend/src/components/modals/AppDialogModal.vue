@@ -1,47 +1,48 @@
 <template>
-  <div v-if="dialogOpen" class="modal-shell" @click.self="handleCancel">
-    <div class="modal-card app-dialog-card">
-      <div class="panel-head app-dialog-head">
-        <h2>{{ dialogTitle }}</h2>
-        <p v-if="dialogMessage">{{ dialogMessage }}</p>
-      </div>
-      <label v-if="dialogMode === 'prompt'" class="app-dialog-field">
-        <span class="app-dialog-label">会话名称</span>
-        <input
+  <Dialog :open="dialogOpen" @update:open="(v) => !v && handleCancel()">
+    <DialogContent class="sm:max-w-md">
+      <DialogHeader>
+        <DialogTitle>{{ dialogTitle }}</DialogTitle>
+        <DialogDescription v-if="dialogMessage">{{ dialogMessage }}</DialogDescription>
+      </DialogHeader>
+
+      <div v-if="dialogMode === 'prompt'" class="py-2">
+        <Input
           ref="inputEl"
           v-model="dialogInput"
-          class="app-dialog-input"
-          type="text"
           :placeholder="dialogPlaceholder"
           maxlength="255"
           @keydown.enter.prevent="handleConfirm"
           @keydown.esc.prevent="handleCancel"
         />
-      </label>
-      <div class="modal-actions app-dialog-actions">
-        <button class="ghost-button" type="button" @click="handleCancel">
+      </div>
+
+      <DialogFooter class="gap-2 sm:gap-0">
+        <Button variant="ghost" @click="handleCancel">
           {{ dialogCancelLabel }}
-        </button>
-        <button
-          class="app-dialog-confirm"
-          :class="{ danger: dialogTone === 'danger' }"
-          type="button"
+        </Button>
+        <Button
+          :variant="dialogTone === 'danger' ? 'destructive' : 'default'"
           @click="handleConfirm"
         >
           {{ dialogConfirmLabel }}
-        </button>
-      </div>
-    </div>
-  </div>
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
 </template>
 
 <script setup>
 import { nextTick, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 
-import { useWorkspaceStore } from "@/stores/workspace";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
-const store = useWorkspaceStore();
+import { useDialogStore } from "@/stores/dialog";
+
+const store = useDialogStore();
 const {
   dialogOpen,
   dialogMode,
@@ -68,11 +69,9 @@ function handleConfirm() {
 }
 
 watch(dialogOpen, async (open) => {
-  if (!open || dialogMode.value !== "prompt") {
-    return;
-  }
+  if (!open || dialogMode.value !== "prompt") return;
   await nextTick();
-  inputEl.value?.focus?.();
-  inputEl.value?.select?.();
+  inputEl.value?.$el?.focus?.();
+  inputEl.value?.$el?.select?.();
 });
 </script>

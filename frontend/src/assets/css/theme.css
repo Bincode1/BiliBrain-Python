@@ -1,0 +1,181 @@
+@import "tw-animate-css";
+
+/* ──────────────────────────────────────────────
+   BiliBrain Design Tokens → shadcn-vue mapping
+   Warm neutral palette — unified across all pages
+   ────────────────────────────────────────────── */
+
+:root {
+  /* ── Font families ── */
+  --font-body: "SF Pro Display", "SF Pro Text", "Segoe UI Variable",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", sans-serif;
+  --font-display: var(--font-body);
+
+  /* ── Core surfaces ── */
+  --background: oklch(98% 0.002 75);
+  --foreground: oklch(22% 0.015 60);
+
+  --card: oklch(100% 0 0);
+  --card-foreground: oklch(22% 0.015 60);
+
+  --popover: oklch(100% 0 0);
+  --popover-foreground: oklch(22% 0.015 60);
+
+  /* ── Primary — warm terracotta accent ── */
+  --primary: oklch(50% 0.14 35);
+  --primary-foreground: oklch(99% 0 0);
+
+  --secondary: oklch(96.5% 0.003 75);
+  --secondary-foreground: oklch(22% 0.015 60);
+
+  --muted: oklch(96.5% 0.003 75);
+  --muted-foreground: oklch(55% 0.015 60);
+
+  --accent: oklch(96.5% 0.003 75);
+  --accent-foreground: oklch(22% 0.015 60);
+
+  --destructive: oklch(58% 0.2 25);
+  --destructive-foreground: oklch(99% 0 0);
+
+  --border: oklch(91% 0.005 75);
+  --input: oklch(91% 0.005 75);
+  --ring: oklch(50% 0.14 35);
+
+  --radius: 0.5rem;
+
+  --success: oklch(55% 0.12 155);
+  --warning: oklch(68% 0.13 65);
+
+  /* ── Legacy compat tokens ── */
+  --bg: var(--background);
+  --bg-deep: var(--secondary);
+  --panel: var(--card);
+  --accent-deep: var(--primary);
+  --accent-soft: var(--secondary);
+  --ok: var(--success);
+  --warn: var(--warning);
+  --danger: var(--destructive);
+  --info: oklch(50% 0.12 240);
+  --shadow: 0 1px 3px rgba(28, 25, 23, 0.06);
+  --shadow-soft: 0 1px 2px rgba(28, 25, 23, 0.04);
+}
+
+/* ── Tailwind v4 theme registration ──
+   Maps CSS custom properties to Tailwind utilities
+   (bg-card, text-foreground, bg-primary, etc.) */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-sidebar-background: var(--background);
+  --color-sidebar-foreground: var(--foreground);
+  --color-sidebar-primary: var(--primary);
+  --color-sidebar-primary-foreground: var(--primary-foreground);
+  --color-sidebar-accent: var(--accent);
+  --color-sidebar-accent-foreground: var(--accent-foreground);
+  --color-sidebar-border: var(--border);
+  --color-sidebar-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: var(--font-body);
+}
+
+/* ──────────────────
+   Base layer resets
+   ────────────────── */
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: "rlig" 1, "calt" 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* ──────────────────────
+   Streaming cursor animation
+   ────────────────────── */
+
+.streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: var(--primary);
+  vertical-align: text-bottom;
+  animation: cursor-blink 1s step-end infinite;
+}
+
+@keyframes cursor-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ──────────────────────
+   Inline citation badges
+   ────────────────────── */
+
+.inline-citation {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  margin: 0 2px;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.4;
+  background: color-mix(in oklch, var(--primary) 12%, transparent);
+  color: var(--primary);
+  text-decoration: none;
+  vertical-align: baseline;
+  transition: background 0.15s, box-shadow 0.15s;
+  cursor: pointer;
+}
+
+.inline-citation:hover {
+  background: color-mix(in oklch, var(--primary) 22%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in oklch, var(--primary) 30%, transparent);
+}
+
+/* Reset prose overrides on citation links */
+.prose .inline-citation {
+  color: var(--primary);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.prose .inline-citation:hover {
+  color: var(--primary);
+  text-decoration: none;
+}

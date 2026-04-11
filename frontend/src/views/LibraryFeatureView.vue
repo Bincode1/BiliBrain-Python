@@ -1,12 +1,10 @@
 <template>
   <WorkspaceRuntime>
-    <section class="library-feature collection-feature-page">
-      <div class="library-shell">
-        <SidebarPanel />
-        <section class="library-workspace collection-workspace">
-          <CollectionWorkspacePanel />
-        </section>
-      </div>
+    <section class="library-feature flex h-full overflow-hidden">
+      <SidebarPanel />
+      <section class="flex flex-1 flex-col overflow-hidden p-3">
+        <CollectionWorkspacePanel />
+      </section>
     </section>
   </WorkspaceRuntime>
 </template>

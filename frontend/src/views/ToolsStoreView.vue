@@ -1,78 +1,79 @@
 <template>
-  <section class="market-list-page tools-list-page">
-    <header class="market-list-header">
-      <div class="market-list-copy">
-        <span class="page-section-kicker">工具目录</span>
-        <h2>Tools</h2>
+  <section class="flex h-full flex-col gap-4 overflow-auto p-4">
+    <!-- Header -->
+    <header class="flex items-center gap-4 border-b border-border px-6 py-4">
+      <div>
+        <span class="text-[10px] uppercase tracking-[0.08em] text-muted-foreground">工具目录</span>
+        <h2 class="text-xl font-semibold">Tools</h2>
       </div>
-      <div class="market-inline-bar compact-tools-summary">
+      <div class="ml-auto flex gap-3 text-xs text-muted-foreground">
         <span>可用 {{ readyCount }}</span>
         <span>分类 {{ categoryCount }}</span>
         <span>规划中 {{ plannedCount }}</span>
       </div>
     </header>
 
-    <div class="market-list">
-      <button
+    <!-- Tool list -->
+    <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+      <Card
         v-for="item in toolsCatalog"
         :key="item.id"
-        type="button"
-        class="market-list-item"
+        class="cursor-pointer transition-all hover:shadow-md"
         @click="selectedToolId = item.id"
       >
-        <div class="market-list-main">
-          <div class="market-list-title">
-            <strong>{{ item.name }}</strong>
-            <p>{{ item.description }}</p>
+        <CardContent class="p-4">
+          <div class="flex items-start justify-between gap-2">
+            <div>
+              <strong class="text-sm">{{ item.name }}</strong>
+              <p class="mt-1 text-xs text-muted-foreground line-clamp-2">{{ item.description }}</p>
+            </div>
+            <div class="flex shrink-0 flex-col gap-1">
+              <Badge variant="outline">{{ item.category }}</Badge>
+              <Badge :variant="item.badgeTone === 'done' ? 'default' : 'secondary'">{{ item.status }}</Badge>
+            </div>
           </div>
-          <div class="market-list-meta">
-            <span class="market-status-chip">{{ item.category }}</span>
-            <span class="market-status-chip" :class="item.badgeTone">{{ item.status }}</span>
-          </div>
-        </div>
-      </button>
+        </CardContent>
+      </Card>
     </div>
 
-    <div v-if="selectedTool" class="market-detail-overlay" @click.self="selectedToolId = ''">
-      <article class="market-detail-modal market-detail-modal-wide">
-        <div class="market-detail-head">
-          <div>
-            <span class="page-section-kicker">工具详情</span>
-            <h3>{{ selectedTool.name }}</h3>
+    <!-- Detail overlay -->
+    <Dialog :open="Boolean(selectedTool)" @update:open="(v) => !v && (selectedToolId = '')">
+      <DialogContent class="max-w-3xl">
+        <DialogHeader>
+          <div class="flex items-center gap-2">
+            <Badge variant="outline">{{ selectedTool?.category }}</Badge>
+            <Badge :variant="selectedTool?.badgeTone === 'done' ? 'default' : 'secondary'">{{ selectedTool?.status }}</Badge>
           </div>
-          <button class="ghost-button" type="button" @click="selectedToolId = ''">关闭</button>
+          <DialogTitle>{{ selectedTool?.name }}</DialogTitle>
+          <DialogDescription>{{ selectedTool?.description }}</DialogDescription>
+        </DialogHeader>
+
+        <div v-if="selectedTool?.highlights?.length" class="flex flex-wrap gap-2">
+          <span v-for="h in selectedTool.highlights" :key="h" class="rounded-full bg-muted px-2 py-0.5 text-[11px]">{{ h }}</span>
         </div>
 
-        <div class="market-detail-tags">
-          <span class="market-status-chip">{{ selectedTool.category }}</span>
-          <span class="market-status-chip" :class="selectedTool.badgeTone">{{ selectedTool.status }}</span>
+        <div v-if="selectedTool && interactiveToolIds.has(selectedTool.id)" class="mt-2">
+          <WorkspaceToolPanel />
         </div>
-
-        <p class="market-detail-copy">{{ selectedTool.description }}</p>
-
-        <div class="market-detail-section">
-          <span class="page-section-kicker">能力</span>
-          <div class="market-chip-list">
-            <span v-for="item in selectedTool.highlights" :key="item" class="market-inline-chip static">{{ item }}</span>
-          </div>
-        </div>
-
-        <WorkspaceToolPanel v-if="interactiveToolIds.has(selectedTool.id)" />
-      </article>
-    </div>
+      </DialogContent>
+    </Dialog>
   </section>
 </template>
 
 <script setup>
 import { computed, ref } from "vue";
 
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+
 import WorkspaceToolPanel from "@/components/tools/WorkspaceToolPanel.vue";
 import { toolsCatalog } from "@/config/toolsCatalog";
 
-const readyCount = computed(() => toolsCatalog.filter((item) => item.status === "已接入" || item.status === "可用").length);
-const categoryCount = computed(() => new Set(toolsCatalog.map((item) => item.category)).size);
-const plannedCount = computed(() => toolsCatalog.filter((item) => item.status === "规划中").length);
+const readyCount = computed(() => toolsCatalog.filter((i) => i.status === "已接入" || i.status === "可用").length);
+const categoryCount = computed(() => new Set(toolsCatalog.map((i) => i.category)).size);
+const plannedCount = computed(() => toolsCatalog.filter((i) => i.status === "规划中").length);
 const selectedToolId = ref("");
 const interactiveToolIds = new Set(["workspace-filesystem", "workspace-command-runner", "web-search"]);
-const selectedTool = computed(() => toolsCatalog.find((item) => item.id === selectedToolId.value) || null);
+const selectedTool = computed(() => toolsCatalog.find((i) => i.id === selectedToolId.value) || null);
 </script>

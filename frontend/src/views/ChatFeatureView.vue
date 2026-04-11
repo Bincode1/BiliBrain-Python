@@ -1,6 +1,6 @@
 <template>
   <WorkspaceRuntime>
-    <section class="chat-feature-page">
+    <section class="chat-feature-page h-full">
       <ChatWorkspace folder-only />
     </section>
   </WorkspaceRuntime>

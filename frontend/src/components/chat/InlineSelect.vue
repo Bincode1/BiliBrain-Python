@@ -1,114 +1,57 @@
 <template>
-  <div ref="rootRef" class="inline-select" :class="{ open, disabled }">
-    <button
-      class="inline-select-trigger"
-      type="button"
-      :disabled="disabled"
-      :title="title || currentLabel"
-      :aria-expanded="open ? 'true' : 'false'"
-      @click="toggle"
-    >
-      <span class="inline-select-label">{{ currentLabel }}</span>
-      <span class="inline-select-caret" aria-hidden="true"></span>
-    </button>
-
-    <div v-if="open" class="inline-select-menu">
-      <button
+  <Select
+    :model-value="normalizedValue"
+    :disabled="disabled"
+    @update:model-value="emit('update:modelValue', String($event ?? ''))"
+  >
+    <SelectTrigger class="h-7 gap-1 rounded-full border-none bg-secondary px-2.5 text-xs shadow-none hover:bg-secondary/80">
+      <SelectValue :placeholder="placeholder || currentLabel" />
+    </SelectTrigger>
+    <SelectContent class="min-w-[140px]" position="popper" :side-offset="4">
+      <SelectItem
         v-for="option in normalizedOptions"
         :key="option.value"
-        class="inline-select-option"
-        :class="{ active: option.value === normalizedValue }"
-        type="button"
+        :value="option.value"
         :disabled="option.disabled"
-        @click="selectOption(option.value)"
+        class="text-xs"
       >
-        <span>{{ option.label }}</span>
-      </button>
-    </div>
-  </div>
+        {{ option.label }}
+      </SelectItem>
+    </SelectContent>
+  </Select>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed } from "vue";
+
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 const props = defineProps({
-  modelValue: {
-    type: String,
-    default: "",
-  },
-  options: {
-    type: Array,
-    default: () => [],
-  },
-  placeholder: {
-    type: String,
-    default: "",
-  },
-  disabled: {
-    type: Boolean,
-    default: false,
-  },
-  title: {
-    type: String,
-    default: "",
-  },
+  modelValue: { type: String, default: "" },
+  options: { type: Array, default: () => [] },
+  placeholder: { type: String, default: "" },
+  disabled: { type: Boolean, default: false },
+  title: { type: String, default: "" },
 });
 
 const emit = defineEmits(["update:modelValue"]);
 
-const rootRef = ref(null);
-const open = ref(false);
-
 const normalizedValue = computed(() => String(props.modelValue ?? ""));
 const normalizedOptions = computed(() =>
-  props.options.map((option) => ({
-    value: String(option.value ?? ""),
-    label: String(option.label ?? ""),
-    disabled: Boolean(option.disabled),
+  props.options.map((o) => ({
+    value: String(o.value ?? ""),
+    label: String(o.label ?? ""),
+    disabled: Boolean(o.disabled),
   }))
 );
-
 const currentLabel = computed(() => {
-  const matched = normalizedOptions.value.find((option) => option.value === normalizedValue.value);
-  return matched?.label || props.placeholder || "";
-});
-
-function toggle() {
-  if (props.disabled) {
-    return;
-  }
-  open.value = !open.value;
-}
-
-function selectOption(value) {
-  emit("update:modelValue", String(value ?? ""));
-  open.value = false;
-}
-
-function handleDocumentClick(event) {
-  if (!open.value) {
-    return;
-  }
-  const target = event.target;
-  if (rootRef.value instanceof HTMLElement && target instanceof Node && rootRef.value.contains(target)) {
-    return;
-  }
-  open.value = false;
-}
-
-function handleKeydown(event) {
-  if (event.key === "Escape") {
-    open.value = false;
-  }
-}
-
-onMounted(() => {
-  document.addEventListener("click", handleDocumentClick);
-  document.addEventListener("keydown", handleKeydown);
-});
-
-onBeforeUnmount(() => {
-  document.removeEventListener("click", handleDocumentClick);
-  document.removeEventListener("keydown", handleKeydown);
+  const match = normalizedOptions.value.find((o) => o.value === normalizedValue.value);
+  return match?.label || "";
 });
 </script>
