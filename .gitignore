@@ -43,6 +43,8 @@ frontend/dist/
 .kilo/
 .trae/
 plan/
+docs/plans/
+bilibrain/docs/plans/
 image.png
 nul
 CLAUDE.md
