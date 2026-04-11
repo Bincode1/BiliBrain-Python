@@ -14,7 +14,8 @@ class AskRequest(BaseModel):
     bvid: str | None = Field(default=None, max_length=32)
     scope_mode: Literal["video", "folder", "global"] | None = Field(default=None)
     conversation_id: int | None = Field(default=None, gt=0)
-    deep_research: bool = Field(default=False)
+    approval_mode: ToolApprovalMode = Field(default=ToolApprovalMode.AUTO)
+    actor: str = Field(default="agent", min_length=1, max_length=64)
 
 
 class ChatConversationCreateRequest(BaseModel):
@@ -38,6 +39,9 @@ class SkillAgentResumeRequest(BaseModel):
     session_id: str = Field(..., min_length=1, max_length=128)
     decision: dict = Field(default_factory=dict)
     actor: str = Field(default="skill-agent", min_length=1, max_length=64)
+    folder_id: int | None = Field(default=None, gt=0)
+    bvid: str | None = Field(default=None, max_length=32)
+    scope_mode: Literal["video", "folder", "global"] | None = Field(default=None)
 
 
 class SettingsRequest(BaseModel):

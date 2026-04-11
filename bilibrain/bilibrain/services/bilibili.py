@@ -5,7 +5,7 @@ import html
 import io
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import reduce
 from hashlib import md5
 from pathlib import Path
@@ -24,10 +24,70 @@ from bilibrain.db.database import Database
 AUTH_COOKIE_NAMES = {"SESSDATA", "bili_jct", "DedeUserID", "DedeUserID__ckMd5"}
 HTML_TAG_RE = re.compile(r"<[^>]+>")
 MIXIN_KEY_ENC_TAB = [
-    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
-    27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
-    37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
-    22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
+    46,
+    47,
+    18,
+    2,
+    53,
+    8,
+    23,
+    32,
+    15,
+    50,
+    10,
+    31,
+    58,
+    3,
+    45,
+    35,
+    27,
+    43,
+    5,
+    49,
+    33,
+    9,
+    42,
+    19,
+    29,
+    28,
+    14,
+    39,
+    12,
+    38,
+    41,
+    13,
+    37,
+    48,
+    7,
+    16,
+    24,
+    55,
+    40,
+    61,
+    26,
+    17,
+    0,
+    1,
+    60,
+    51,
+    30,
+    4,
+    22,
+    25,
+    54,
+    21,
+    56,
+    59,
+    6,
+    63,
+    57,
+    62,
+    11,
+    36,
+    20,
+    34,
+    44,
+    52,
 ]
 
 
@@ -63,15 +123,15 @@ class BilibiliClient:
         self._session_cache = None
         self._session_cache_expires_at = 0.0
 
-    def _restore_cookies(self) -> None:
-        cookies = self.db.load_state("auth_cookies") or {}
+    async def _restore_cookies(self) -> None:
+        cookies = (await self.db.load_state("auth_cookies")) or {}
         self.client.cookies.clear()
         self.browser.cookies.clear()
         for name, value in cookies.items():
             self.client.cookies.set(name, value, domain=".bilibili.com")
             self.browser.cookies.set(name, value, domain=".bilibili.com")
 
-    def _persist_cookies(self) -> None:
+    async def _persist_cookies(self) -> None:
         interesting: dict[str, str] = {}
         for cookie in self.client.cookies.jar:
             if "bilibili.com" not in cookie.domain:
@@ -86,7 +146,7 @@ class BilibiliClient:
                 continue
             interesting[cookie.name] = cookie.value
         if interesting:
-            self.db.save_state("auth_cookies", interesting)
+            await self.db.save_state("auth_cookies", interesting)
             self._invalidate_session_cache()
 
     def _warmup_browser_cookies_sync(self) -> None:
@@ -140,7 +200,9 @@ class BilibiliClient:
         response.raise_for_status()
         payload = response.json()
         if payload.get("code") not in (0, None):
-            raise RuntimeError(payload.get("message") or payload.get("msg") or "获取 WBI key 失败。")
+            raise RuntimeError(
+                payload.get("message") or payload.get("msg") or "获取 WBI key 失败。"
+            )
 
         data = payload.get("data") or {}
         wbi_img = data.get("wbi_img") or {}
@@ -185,7 +247,11 @@ class BilibiliClient:
         response.raise_for_status()
         payload = response.json()
         if payload.get("code") not in (0, None):
-            raise RuntimeError(payload.get("message") or payload.get("msg") or "Bilibili API 返回失败。")
+            raise RuntimeError(
+                payload.get("message")
+                or payload.get("msg")
+                or "Bilibili API 返回失败。"
+            )
         return payload
 
     async def _get_json(
@@ -195,20 +261,24 @@ class BilibiliClient:
         use_wbi: bool = False,
     ) -> dict[str, Any]:
         async with self._request_lock:
-            wait_seconds = self.settings.bili_api_delay - (time.monotonic() - self._last_request_at)
+            wait_seconds = self.settings.bili_api_delay - (
+                time.monotonic() - self._last_request_at
+            )
             if wait_seconds > 0:
                 await asyncio.sleep(wait_seconds)
 
-            self._restore_cookies()
+            await self._restore_cookies()
             try:
-                payload = await asyncio.to_thread(self._request_json_sync, url, params, use_wbi)
+                payload = await asyncio.to_thread(
+                    self._request_json_sync, url, params, use_wbi
+                )
             except Exception as exc:
                 self._last_request_at = time.monotonic()
                 if isinstance(exc, RuntimeError):
                     raise
                 raise RuntimeError(str(exc)) from exc
 
-            self._persist_cookies()
+            await self._persist_cookies()
             self._last_request_at = time.monotonic()
             return payload
 
@@ -216,18 +286,24 @@ class BilibiliClient:
         if self._session_cache and time.monotonic() < self._session_cache_expires_at:
             return dict(self._session_cache)
 
-        cookies = self.db.load_state("auth_cookies") or {}
+        cookies = (await self.db.load_state("auth_cookies")) or {}
         if not cookies:
             session = {"logged_in": False}
             self._session_cache = dict(session)
-            self._session_cache_expires_at = time.monotonic() + max(self.settings.session_cache_ttl_seconds, 1)
+            self._session_cache_expires_at = time.monotonic() + max(
+                self.settings.session_cache_ttl_seconds, 1
+            )
             return session
         try:
-            payload = await self._get_json("https://api.bilibili.com/x/web-interface/nav")
+            payload = await self._get_json(
+                "https://api.bilibili.com/x/web-interface/nav"
+            )
         except Exception:
             session = {"logged_in": False}
             self._session_cache = dict(session)
-            self._session_cache_expires_at = time.monotonic() + max(self.settings.session_cache_ttl_seconds, 1)
+            self._session_cache_expires_at = time.monotonic() + max(
+                self.settings.session_cache_ttl_seconds, 1
+            )
             return session
         data = payload.get("data") or {}
         session = {
@@ -236,7 +312,9 @@ class BilibiliClient:
             "uid": data.get("mid"),
         }
         self._session_cache = dict(session)
-        self._session_cache_expires_at = time.monotonic() + max(self.settings.session_cache_ttl_seconds, 1)
+        self._session_cache_expires_at = time.monotonic() + max(
+            self.settings.session_cache_ttl_seconds, 1
+        )
         return session
 
     async def start_qr_login(self) -> dict[str, str]:
@@ -254,7 +332,7 @@ class BilibiliClient:
         }
 
     async def poll_qr_login(self, qrcode_key: str) -> dict[str, Any]:
-        self._restore_cookies()
+        await self._restore_cookies()
         response = await self.client.get(
             "https://passport.bilibili.com/x/passport-login/web/qrcode/poll",
             params={"qrcode_key": qrcode_key},
@@ -264,7 +342,7 @@ class BilibiliClient:
         data = payload.get("data") or {}
         code = data.get("code")
         if code == 0:
-            self._persist_cookies()
+            await self._persist_cookies()
             self._invalidate_session_cache()
             session = await self.get_session()
             return {"status": "confirmed", **session}
@@ -298,7 +376,9 @@ class BilibiliClient:
         if items is None:
             raise RuntimeError("Bilibili 返回的收藏夹列表为空。")
         if not isinstance(items, list):
-            raise RuntimeError(f"Bilibili 收藏夹列表返回格式异常：{type(items).__name__}")
+            raise RuntimeError(
+                f"Bilibili 收藏夹列表返回格式异常：{type(items).__name__}"
+            )
         folders = [
             {
                 "folder_id": int(item["id"]),
@@ -307,7 +387,7 @@ class BilibiliClient:
             }
             for item in items
         ]
-        return self.db.save_folders(target_uid, folders)
+        return await self.db.save_folders(target_uid, folders)
 
     async def list_folder_videos(self, folder_id: int) -> list[dict[str, Any]]:
         page = 1
@@ -331,7 +411,9 @@ class BilibiliClient:
             medias = data.get("medias") or []
             for index, media in enumerate(medias):
                 raw_bvid = str(media.get("bvid") or "").strip()
-                resource_id = media.get("id") or media.get("fav_time") or f"page{page}-idx{index}"
+                resource_id = (
+                    media.get("id") or media.get("fav_time") or f"page{page}-idx{index}"
+                )
                 is_invalid = not raw_bvid
                 bvid = raw_bvid or f"invalid:{folder_id}:{resource_id}"
                 upper = media.get("upper") or {}
@@ -339,13 +421,15 @@ class BilibiliClient:
                 videos.append(
                     {
                         "bvid": bvid,
-                        "title": media.get("title") or ("已失效视频" if is_invalid else bvid),
-                        "up_name": upper.get("name") or ("视频已失效" if is_invalid else None),
+                        "title": media.get("title")
+                        or ("已失效视频" if is_invalid else bvid),
+                        "up_name": upper.get("name")
+                        or ("视频已失效" if is_invalid else None),
                         "cover_url": self._resolve_cover_url(media.get("cover")),
                         "duration": int(media.get("duration") or 0),
                         "is_invalid": is_invalid,
                         "published_at": (
-                            datetime.utcfromtimestamp(pubtime) if pubtime else None
+                            datetime.fromtimestamp(pubtime, tz=timezone.utc) if pubtime else None
                         ),
                     }
                 )
@@ -400,7 +484,7 @@ class BilibiliClient:
                     "favorites": int(item.get("favorites") or 0),
                     "tag_text": self._strip_html(item.get("tag")),
                     "published_at": (
-                        datetime.utcfromtimestamp(int(item.get("pubdate") or 0))
+                        datetime.fromtimestamp(int(item.get("pubdate") or 0), tz=timezone.utc)
                         if item.get("pubdate")
                         else None
                     ),
@@ -449,7 +533,7 @@ class BilibiliClient:
             "https://api.bilibili.com/x/player/playurl",
             params={"bvid": bvid, "cid": cid, "qn": 64, "fnval": 16, "fourk": 1},
         )
-        dash_data = ((playurl_payload.get("data") or {}).get("dash") or {})
+        dash_data = (playurl_payload.get("data") or {}).get("dash") or {}
         audio_tracks = dash_data.get("audio") or []
         if not audio_tracks:
             raise RuntimeError(f"{bvid} 没有可用音频流。")
@@ -465,14 +549,18 @@ class BilibiliClient:
         return {
             "cid": int(cid),
             "audio_url": audio_url,
-            "mime_type": chosen.get("mimeType") or chosen.get("mime_type") or "audio/mp4",
+            "mime_type": chosen.get("mimeType")
+            or chosen.get("mime_type")
+            or "audio/mp4",
             "bandwidth": int(chosen.get("bandwidth") or 0),
             "track_id": chosen.get("id"),
         }
 
-    async def download_audio_track(self, bvid: str, output_path: Path) -> dict[str, Any]:
+    async def download_audio_track(
+        self, bvid: str, output_path: Path
+    ) -> dict[str, Any]:
         track = await self.fetch_audio_track(bvid)
-        self._restore_cookies()
+        await self._restore_cookies()
         async with self.client.stream(
             "GET",
             track["audio_url"],

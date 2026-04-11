@@ -8,9 +8,11 @@ from bilibrain.core.runtime import Runtime
 from bilibrain.schemas.requests import SkillAgentAskRequest, SkillAgentResumeRequest
 from bilibrain.services.skill_agent import (
     answer_with_skill_agent,
-    resume_skill_agent_turn,
     stream_answer_with_skill_agent_events,
-    stream_resume_skill_agent_turn_events,
+)
+from bilibrain.services.unified_agent import (
+    resume_unified_agent_turn,
+    stream_resume_unified_agent_events,
 )
 
 
@@ -28,20 +30,6 @@ async def skill_agent_ask(
         conversation_id=payload.conversation_id,
         session_id=payload.session_id,
         approval_mode=payload.approval_mode,
-        actor=payload.actor,
-    )
-
-
-@router.post("/api/skill-agent/resume")
-async def skill_agent_resume(
-    payload: SkillAgentResumeRequest,
-    runtime: Runtime = Depends(get_runtime),
-) -> dict[str, object]:
-    return await resume_skill_agent_turn(
-        runtime,
-        session_id=payload.session_id,
-        decision=payload.decision,
-        conversation_id=payload.conversation_id,
         actor=payload.actor,
     )
 
@@ -69,17 +57,37 @@ async def skill_agent_ask_stream(
     )
 
 
+@router.post("/api/skill-agent/resume")
+async def skill_agent_resume(
+    payload: SkillAgentResumeRequest,
+    runtime: Runtime = Depends(get_runtime),
+) -> dict[str, object]:
+    return await resume_unified_agent_turn(
+        runtime,
+        session_id=payload.session_id,
+        decision=payload.decision,
+        conversation_id=payload.conversation_id,
+        folder_id=payload.folder_id,
+        bvid=payload.bvid,
+        scope_mode=payload.scope_mode,
+        actor=payload.actor,
+    )
+
+
 @router.post("/api/skill-agent/resume/stream")
 async def skill_agent_resume_stream(
     payload: SkillAgentResumeRequest,
     runtime: Runtime = Depends(get_runtime),
 ) -> StreamingResponse:
     return StreamingResponse(
-        stream_resume_skill_agent_turn_events(
+        stream_resume_unified_agent_events(
             runtime,
             session_id=payload.session_id,
             decision=payload.decision,
             conversation_id=payload.conversation_id,
+            folder_id=payload.folder_id,
+            bvid=payload.bvid,
+            scope_mode=payload.scope_mode,
             actor=payload.actor,
         ),
         media_type="text/event-stream",

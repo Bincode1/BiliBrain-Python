@@ -10,8 +10,17 @@ from bilibrain.tools.contracts import (
     ToolCallResult,
     ToolCallTimer,
 )
-from bilibrain.tools.errors import PolicyError, ToolApprovalRequiredError, WorkspaceError
-from bilibrain.tools.policy import ToolPolicy, ToolPolicyDecision, build_tool_policy, evaluate_command_request
+from bilibrain.tools.errors import (
+    PolicyError,
+    ToolApprovalRequiredError,
+    WorkspaceError,
+)
+from bilibrain.tools.policy import (
+    ToolPolicy,
+    ToolPolicyDecision,
+    build_tool_policy,
+    evaluate_command_request,
+)
 from bilibrain.tools.registry import ToolRegistryItem, build_default_tool_registry
 from bilibrain.tools.workspace import create_workspace_session, get_workspace_root
 
@@ -51,9 +60,13 @@ class ToolService:
             )
         return tools
 
-    def list_workspaces(self, *, feature_name: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_workspaces(
+        self, *, feature_name: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         if self.db is not None:
-            rows = self.db.list_tool_workspaces(feature_name=feature_name, limit=limit)
+            rows = await self.db.list_tool_workspaces(
+                feature_name=feature_name, limit=limit
+            )
         else:
             rows = list(self._workspace_cache.values())
             if feature_name:
@@ -62,7 +75,9 @@ class ToolService:
 
         result = []
         for row in rows:
-            workspace_root = get_workspace_root(self.workspace_base_root, row["workspace_id"])
+            workspace_root = get_workspace_root(
+                self.workspace_base_root, row["workspace_id"]
+            )
             title = str(row.get("title") or "").strip()
             feature = str(row.get("feature_name") or "workspace")
             short_id = str(row["workspace_id"])[:8]
@@ -76,7 +91,7 @@ class ToolService:
             )
         return result
 
-    def create_workspace(
+    async def create_workspace(
         self,
         *,
         feature_name: str,
@@ -85,7 +100,7 @@ class ToolService:
         actor: str = "system",
     ) -> dict[str, Any]:
         if self.db is not None:
-            row = create_workspace_session(
+            row = await create_workspace_session(
                 self.db,
                 feature_name=feature_name,
                 conversation_id=conversation_id,
@@ -96,28 +111,37 @@ class ToolService:
             workspace_id = f"{feature_name}-{len(self._workspace_cache) + 1}"
             row = {
                 "workspace_id": workspace_id,
-                "scope_key": f"{feature_name}:{conversation_id}" if conversation_id else feature_name,
+                "scope_key": f"{feature_name}:{conversation_id}"
+                if conversation_id
+                else feature_name,
                 "feature_name": feature_name,
                 "conversation_id": conversation_id,
                 "title": title or "",
                 "actor": actor,
             }
             self._workspace_cache[workspace_id] = row
-        workspace_root = get_workspace_root(self.workspace_base_root, row["workspace_id"])
+        workspace_root = get_workspace_root(
+            self.workspace_base_root, row["workspace_id"]
+        )
         return {
             **row,
             "root_path": str(workspace_root),
         }
 
-    def get_workspace(self, workspace_id: str) -> dict[str, Any]:
-        workspace = self.db.get_tool_workspace(workspace_id) if self.db is not None else self._workspace_cache.get(workspace_id)
+    async def get_workspace(self, workspace_id: str) -> dict[str, Any]:
+        workspace = (
+            await self.db.get_tool_workspace(workspace_id)
+            if self.db is not None
+            else self._workspace_cache.get(workspace_id)
+        )
         if not workspace:
             raise WorkspaceError("Workspace does not exist.")
         workspace_root = get_workspace_root(self.workspace_base_root, workspace_id)
         return {
             **workspace,
             "root_path": str(workspace_root),
-            "display_name": str(workspace.get("title") or "").strip() or f"{workspace.get('feature_name') or 'workspace'}:{workspace_id[:8]}",
+            "display_name": str(workspace.get("title") or "").strip()
+            or f"{workspace.get('feature_name') or 'workspace'}:{workspace_id[:8]}",
         }
 
     async def call_tool(
@@ -147,11 +171,11 @@ class ToolService:
         if item is None or not item.definition.enabled:
             raise RuntimeError(f"Unknown tool: {request.tool_name}")
 
-        workspace = self.get_workspace(request.workspace_id)
+        workspace = await self.get_workspace(request.workspace_id)
         workspace_root = Path(workspace["root_path"])
 
         if self.db is not None:
-            self.db.log_tool_call(
+            await self.db.log_tool_call(
                 trace_id=request.trace_id,
                 workspace_id=request.workspace_id,
                 tool_name=request.tool_name,
@@ -164,7 +188,10 @@ class ToolService:
         decision = self._evaluate_request(item, request)
         if not decision.allowed:
             raise PolicyError(decision.reason)
-        if decision.requires_approval and request.approval_mode != ToolApprovalMode.PREAPPROVED:
+        if (
+            decision.requires_approval
+            and request.approval_mode != ToolApprovalMode.PREAPPROVED
+        ):
             raise ToolApprovalRequiredError(decision.reason)
 
         kwargs = {
@@ -182,7 +209,7 @@ class ToolService:
         final_result = result.model_copy(update={"duration_ms": timer.elapsed_ms()})
 
         if self.db is not None:
-            self.db.log_tool_call(
+            await self.db.log_tool_call(
                 trace_id=request.trace_id,
                 workspace_id=request.workspace_id,
                 tool_name=request.tool_name,
@@ -196,7 +223,9 @@ class ToolService:
             )
         return final_result
 
-    def _evaluate_request(self, item: ToolRegistryItem, request: ToolCallRequest) -> ToolPolicyDecision:
+    def _evaluate_request(
+        self, item: ToolRegistryItem, request: ToolCallRequest
+    ) -> ToolPolicyDecision:
         capabilities = set(item.definition.capabilities)
         if any(cap.value == "filesystem_write" for cap in capabilities):
             return ToolPolicyDecision(
@@ -205,8 +234,12 @@ class ToolService:
                 reason="Write tool requires preapproval under the current policy.",
             )
         if request.tool_name != "run_command":
-            return ToolPolicyDecision(allowed=True, requires_approval=False, reason="Tool allowed.")
-        return evaluate_command_request(self.policy, str(request.arguments.get("command") or ""))
+            return ToolPolicyDecision(
+                allowed=True, requires_approval=False, reason="Tool allowed."
+            )
+        return evaluate_command_request(
+            self.policy, str(request.arguments.get("command") or "")
+        )
 
 
 def create_tool_service(settings, db) -> ToolService:

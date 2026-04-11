@@ -1,3 +1,3 @@
-from .audio import AudioObjectRef, AudioStorageService, create_audio_storage_service
+from .audio import AudioObjectRef, AudioStorageService
 
-__all__ = ["AudioObjectRef", "AudioStorageService", "create_audio_storage_service"]
+__all__ = ["AudioObjectRef", "AudioStorageService"]

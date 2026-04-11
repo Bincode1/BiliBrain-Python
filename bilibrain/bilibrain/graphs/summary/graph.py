@@ -56,4 +56,4 @@ def get_summary_graph():
 async def run_summary_graph(runtime, bvid: str) -> dict | None:
     graph = get_summary_graph()
     await graph.ainvoke(build_initial_summary_state(runtime, bvid))
-    return runtime.db.get_video_summary(bvid)
+    return await runtime.db.get_video_summary(bvid)

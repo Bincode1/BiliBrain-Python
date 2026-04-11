@@ -1,18 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
-import mimetypes
 import subprocess
 import tempfile
 from inspect import isawaitable
 from pathlib import Path
 from time import perf_counter
 from typing import Any
-
-from langchain_core.messages import HumanMessage
-from langchain_qwq import ChatQwen
 
 from bilibrain.ai.audio_chunking import (
     SILENCE_END_RE,
@@ -22,25 +17,55 @@ from bilibrain.ai.audio_chunking import (
 )
 from bilibrain.core.config import Settings
 
-
 logger = logging.getLogger(__name__)
 
 
-class AsrClient:
+class WhisperAsrClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.model = ChatQwen(
-            model=settings.asr_model,
-            api_key=settings.dashscope_api_key,
-            base_url=settings.dashscope_base_url,
-            temperature=0,
-        )
+        self._model = None
+
+    def _get_model(self):
+        if self._model is None:
+            from faster_whisper import WhisperModel
+
+            device = self.settings.whisper_device
+            compute_type = self.settings.whisper_compute_type
+
+            if device == "cuda":
+                try:
+                    self._model = WhisperModel(
+                        self.settings.whisper_model,
+                        device="cuda",
+                        compute_type=compute_type,
+                    )
+                    logger.info(
+                        "Loaded faster-whisper model: %s on CUDA (compute_type=%s)",
+                        self.settings.whisper_model,
+                        compute_type,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "CUDA unavailable (%s), falling back to CPU", exc
+                    )
+                    device = "cpu"
+                    compute_type = "int8"
+
+            if device == "cpu":
+                self._model = WhisperModel(
+                    self.settings.whisper_model,
+                    device="cpu",
+                    compute_type="int8",
+                )
+                logger.info(
+                    "Loaded faster-whisper model: %s on CPU (compute_type=int8)",
+                    self.settings.whisper_model,
+                )
+        return self._model
 
     def ensure_configured(self) -> None:
-        if not self.settings.dashscope_api_key:
-            raise RuntimeError("DASHSCOPE_API_KEY not set")
-        if not self.settings.asr_model:
-            raise RuntimeError("ASR_MODEL not set")
+        if not self.settings.whisper_model:
+            raise RuntimeError("WHISPER_MODEL not set")
 
     async def transcribe_audio_file(self, audio_path: Path, *, on_progress=None) -> dict[str, Any]:
         self.ensure_configured()
@@ -82,7 +107,7 @@ class AsrClient:
             )
             transcribe_elapsed = perf_counter() - transcribe_started
             logger.info(
-                "ASR transcription RPC completed for %s: %s chunks in %.2fs with concurrency=%s",
+                "ASR transcription completed for %s: %s chunks in %.2fs with concurrency=%s",
                 audio_path.name,
                 chunk_count,
                 transcribe_elapsed,
@@ -109,7 +134,7 @@ class AsrClient:
             total_elapsed,
         )
         return {
-            "model": self.settings.asr_model,
+            "model": f"faster-whisper/{self.settings.whisper_model}",
             "chunk_target_seconds": self.settings.asr_target_chunk_seconds,
             "chunk_max_seconds": self.settings.asr_chunk_seconds,
             "chunk_overlap_seconds": self.settings.asr_chunk_overlap_seconds,
@@ -140,7 +165,7 @@ class AsrClient:
                     len(chunk_specs),
                     chunk_spec["path"].name,
                 )
-                text = (await self.transcribe_file(chunk_spec["path"])).strip()
+                text = (await asyncio.to_thread(self._transcribe_file_sync, chunk_spec["path"])).strip()
                 chunk_elapsed = perf_counter() - chunk_started
                 logger.info(
                     "ASR chunk completed for %s: %s/%s in %.2fs",
@@ -173,6 +198,17 @@ class AsrClient:
                 await asyncio.gather(*tasks, return_exceptions=True)
         return results
 
+    def _transcribe_file_sync(self, audio_path: Path) -> str:
+        model = self._get_model()
+        segments_iter, info = model.transcribe(
+            str(audio_path),
+            language=self.settings.asr_language or "zh",
+            beam_size=5,
+            vad_filter=True,
+        )
+        texts = [segment.text for segment in segments_iter]
+        return " ".join(texts)
+
     def _build_segments_from_chunks(
         self,
         chunk_specs: list[dict[str, Any]],
@@ -204,35 +240,6 @@ class AsrClient:
         result = callback(payload)
         if isawaitable(result):
             await result
-
-    async def transcribe_file(self, audio_path: Path) -> str:
-        payload = self._build_audio_data_url(audio_path)
-        message = HumanMessage(
-            content=[
-                {
-                    "type": "input_audio",
-                    "input_audio": {
-                        "data": payload,
-                    },
-                }
-            ]
-        )
-        result = await self.model.ainvoke(
-            [message],
-            extra_body={
-                "asr_options": {
-                    "language": self.settings.asr_language,
-                    "enable_itn": True,
-                }
-            },
-        )
-        return str(result.content).strip()
-
-    def _build_audio_data_url(self, audio_path: Path) -> str:
-        mime_type, _ = mimetypes.guess_type(audio_path.name)
-        mime_type = mime_type or "audio/mpeg"
-        payload = base64.b64encode(audio_path.read_bytes()).decode("ascii")
-        return f"data:{mime_type};base64,{payload}"
 
     def _chunk_audio(self, audio_path: Path, output_dir: Path) -> list[dict[str, Any]]:
         total_duration = self._probe_duration(audio_path)
@@ -359,4 +366,4 @@ class AsrClient:
             return float(self.settings.asr_chunk_seconds)
 
     async def close(self) -> None:
-        return None
+        self._model = None

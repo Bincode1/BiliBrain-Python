@@ -29,7 +29,9 @@ async def list_tool_workspaces(
     if runtime.tool_service is None:
         raise RuntimeError("Tool service is not available.")
     return {
-        "workspaces": runtime.tool_service.list_workspaces(feature_name=feature_name, limit=limit),
+        "workspaces": await runtime.tool_service.list_workspaces(
+            feature_name=feature_name, limit=limit
+        ),
     }
 
 
@@ -40,7 +42,7 @@ async def create_tool_workspace(
 ) -> dict[str, Any]:
     if runtime.tool_service is None:
         raise RuntimeError("Tool service is not available.")
-    return runtime.tool_service.create_workspace(
+    return await runtime.tool_service.create_workspace(
         feature_name=payload.feature_name,
         conversation_id=payload.conversation_id,
         title=payload.title,
@@ -49,10 +51,12 @@ async def create_tool_workspace(
 
 
 @router.get("/api/tools/workspaces/{workspace_id}")
-async def get_tool_workspace(workspace_id: str, runtime: Runtime = Depends(get_runtime)) -> dict[str, Any]:
+async def get_tool_workspace(
+    workspace_id: str, runtime: Runtime = Depends(get_runtime)
+) -> dict[str, Any]:
     if runtime.tool_service is None:
         raise RuntimeError("Tool service is not available.")
-    return runtime.tool_service.get_workspace(workspace_id)
+    return await runtime.tool_service.get_workspace(workspace_id)
 
 
 @router.post("/api/tools/call")

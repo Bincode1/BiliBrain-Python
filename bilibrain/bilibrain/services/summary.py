@@ -16,34 +16,40 @@ SUMMARY_GROUP_MAX_DOCS = 8
 SUMMARY_GROUP_MAX_CHARS = 12000
 SUMMARY_AUTOGEN_FOLDER_LIMIT = 6
 
-SUMMARY_KEYWORDS = frozenset({
-    "总结",
-    "概括",
-    "归纳",
-    "梳理",
-    "主要内容",
-    "核心内容",
-    "核心观点",
-    "讲了什么",
-    "说了什么",
-    "主要讲",
-})
-FOLDER_SCOPE_KEYWORDS = frozenset({
-    "收藏夹",
-    "这些视频",
-    "文件夹",
-    "这一组",
-    "这组视频",
-    "这一批视频",
-})
-VIDEO_SCOPE_KEYWORDS = frozenset({
-    "这个视频",
-    "这条视频",
-    "这期视频",
-    "本视频",
-    "当前视频",
-    "这期",
-})
+SUMMARY_KEYWORDS = frozenset(
+    {
+        "总结",
+        "概括",
+        "归纳",
+        "梳理",
+        "主要内容",
+        "核心内容",
+        "核心观点",
+        "讲了什么",
+        "说了什么",
+        "主要讲",
+    }
+)
+FOLDER_SCOPE_KEYWORDS = frozenset(
+    {
+        "收藏夹",
+        "这些视频",
+        "文件夹",
+        "这一组",
+        "这组视频",
+        "这一批视频",
+    }
+)
+VIDEO_SCOPE_KEYWORDS = frozenset(
+    {
+        "这个视频",
+        "这条视频",
+        "这期视频",
+        "本视频",
+        "当前视频",
+        "这期",
+    }
+)
 
 
 def normalize_scope_mode(scope_mode: str | None) -> str | None:
@@ -94,12 +100,17 @@ def classify_query_intent(
     if has_video_scope and scope["bvid"]:
         return {"intent": "video_summary", "scope": "video"}
     if has_folder_scope:
-        return {"intent": "folder_summary", "scope": "folder" if scope["folder_id"] is not None else "global"}
+        return {
+            "intent": "folder_summary",
+            "scope": "folder" if scope["folder_id"] is not None else "global",
+        }
     if scope["scope"] == "video" and scope["bvid"]:
         return {"intent": "video_summary", "scope": "video"}
     if scope["scope"] == "folder":
         return {"intent": "folder_summary", "scope": "folder"}
     return {"intent": "folder_summary", "scope": "global"}
+
+
 def compute_transcript_hash(transcript_text: str) -> str:
     return hashlib.sha256(str(transcript_text or "").encode("utf-8")).hexdigest()
 
@@ -187,7 +198,12 @@ def build_summary_sources(
             {
                 "ref_index": index,
                 "bvid": str(item.get("bvid") or ""),
-                "video_title": str(item.get("video_title") or item.get("title") or item.get("bvid") or "未知视频"),
+                "video_title": str(
+                    item.get("video_title")
+                    or item.get("title")
+                    or item.get("bvid")
+                    or "未知视频"
+                ),
                 "up_name": str(item.get("up_name") or "未知 UP"),
                 "timestamp": "摘要",
                 "jump_url": build_jump_url(str(item.get("bvid") or ""), 0),
@@ -219,13 +235,13 @@ async def load_summary_documents(
         summary = await ensure_video_summary(runtime, bvid)
         return [summary] if summary else []
 
-    documents = runtime.db.list_video_summaries(folder_id)
+    documents = await runtime.db.list_video_summaries(folder_id)
     if folder_id is None or len(documents) >= SUMMARY_AUTOGEN_FOLDER_LIMIT:
         return documents
 
     indexed_videos = [
         item
-        for item in runtime.db.get_video_records(folder_id)
+        for item in await runtime.db.get_video_records(folder_id)
         if str(item.get("sync_status") or "") == "indexed"
     ]
     existing_bvids = {str(item.get("bvid") or "") for item in documents}
@@ -253,4 +269,4 @@ async def load_summary_documents(
         if summary and not isinstance(summary, Exception):
             existing_bvids.add(bvid)
 
-    return runtime.db.list_video_summaries(folder_id)
+    return await runtime.db.list_video_summaries(folder_id)

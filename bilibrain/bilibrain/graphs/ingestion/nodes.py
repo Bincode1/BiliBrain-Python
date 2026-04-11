@@ -24,8 +24,9 @@ logger = logging.getLogger(__name__)
 async def load_video_context(state: IngestionState) -> IngestionState:
     runtime = state["runtime"]
     bvid = state["bvid"]
-    video = require_video(runtime, bvid)
-    processing_settings = runtime.db.get_processing_settings()
+    logger.info("[%s] Loading video context...", bvid)
+    video = await require_video(runtime, bvid)
+    processing_settings = await runtime.db.get_processing_settings()
     return {
         "video": video,
         "processing_settings": processing_settings,
@@ -37,12 +38,15 @@ async def load_video_context(state: IngestionState) -> IngestionState:
 
 async def validate_video_context(state: IngestionState) -> IngestionState:
     runtime = state["runtime"]
-    video = state["video"] or require_video(runtime, state["bvid"])
+    video = state["video"] or await require_video(runtime, state["bvid"])
     ensure_processable_video(video)
     runtime.embedder.ensure_configured()
 
     duration_seconds = int(state.get("duration_seconds") or video.get("duration") or 0)
-    max_video_minutes = int(state.get("max_video_minutes") or runtime.db.get_processing_settings()["max_video_minutes"])
+    max_video_minutes = int(
+        state.get("max_video_minutes")
+        or (await runtime.db.get_processing_settings())["max_video_minutes"]
+    )
     if duration_seconds > max_video_minutes * 60:
         raise RuntimeError(duration_limit_message(duration_seconds, max_video_minutes))
 
@@ -57,12 +61,13 @@ async def validate_video_context(state: IngestionState) -> IngestionState:
 async def ensure_audio_input(state: IngestionState) -> IngestionState:
     runtime = state["runtime"]
     bvid = state["bvid"]
-    video = state["video"] or require_video(runtime, bvid)
+    video = state["video"] or await require_video(runtime, bvid)
     temp_audio_path = Path(state["temp_audio_path"])
-    pipeline_state = runtime.db.get_pipeline_state(bvid)
+    pipeline_state = await runtime.db.get_pipeline_state(bvid)
     hydrate_audio_step_state(runtime, video, pipeline_state)
 
     if pipeline_state["audio"]["status"] == "done":
+        logger.info("[%s] Audio already exists, skipping download", bvid)
         resolved_path = await prepare_audio_input_file(runtime, video, temp_audio_path)
         return {
             "video": video,
@@ -70,22 +75,25 @@ async def ensure_audio_input(state: IngestionState) -> IngestionState:
             "current_step": "transcript",
         }
 
-    runtime.db.update_pipeline_step(
+    logger.info("[%s] Downloading audio track...", bvid)
+    await runtime.db.update_pipeline_step(
         bvid,
         "audio",
         "running",
         path=str(temp_audio_path),
     )
     audio_track = await runtime.bili.download_audio_track(bvid, temp_audio_path)
+    logger.info("[%s] Audio downloaded, uploading to storage...", bvid)
     audio_object = await runtime.audio_storage.upload_audio(temp_audio_path, bvid=bvid)
-    runtime.db.mark_video_processed(
+    logger.info("[%s] Audio stored: %s", bvid, audio_object.object_key)
+    await runtime.db.mark_video_processed(
         bvid=bvid,
         cid=int(audio_track["cid"]) if audio_track.get("cid") else None,
         transcript_source=None,
         audio_storage_provider=audio_object.provider,
         audio_object_key=audio_object.object_key,
     )
-    runtime.db.update_pipeline_step(
+    await runtime.db.update_pipeline_step(
         bvid,
         "audio",
         "done",
@@ -95,7 +103,7 @@ async def ensure_audio_input(state: IngestionState) -> IngestionState:
         url=audio_object.url,
     )
     return {
-        "video": require_video(runtime, bvid),
+        "video": await require_video(runtime, bvid),
         "temp_audio_path": str(temp_audio_path),
         "current_step": "transcript",
     }
@@ -104,12 +112,12 @@ async def ensure_audio_input(state: IngestionState) -> IngestionState:
 async def ensure_transcript_data(state: IngestionState) -> IngestionState:
     runtime = state["runtime"]
     bvid = state["bvid"]
-    transcript = runtime.db.get_transcript(bvid)
-    pipeline_state = runtime.db.get_pipeline_state(bvid)
+    transcript = await runtime.db.get_transcript(bvid)
+    pipeline_state = await runtime.db.get_pipeline_state(bvid)
 
     if pipeline_state["transcript"]["status"] == "done":
         if not transcript:
-            runtime.db.update_pipeline_step(
+            await runtime.db.update_pipeline_step(
                 bvid,
                 "transcript",
                 "pending",
@@ -123,7 +131,7 @@ async def ensure_transcript_data(state: IngestionState) -> IngestionState:
         }
 
     if transcript:
-        runtime.db.update_pipeline_step(
+        await runtime.db.update_pipeline_step(
             bvid,
             "transcript",
             "done",
@@ -136,11 +144,12 @@ async def ensure_transcript_data(state: IngestionState) -> IngestionState:
         }
 
     runtime.asr.ensure_configured()
-    runtime.db.update_pipeline_step(
+    logger.info("[%s] Starting ASR transcription...", bvid)
+    await runtime.db.update_pipeline_step(
         bvid,
         "transcript",
         "running",
-        source_model=runtime.settings.asr_model,
+        source_model=runtime.settings.whisper_model,
         segment_count=0,
         substage="chunking",
         substage_label="正在分析静音并切分音频",
@@ -148,11 +157,11 @@ async def ensure_transcript_data(state: IngestionState) -> IngestionState:
     transcript_started = perf_counter()
 
     async def _handle_progress(event: dict[str, object]) -> None:
-        runtime.db.update_pipeline_step(
+        await runtime.db.update_pipeline_step(
             bvid,
             "transcript",
             "running",
-            source_model=runtime.settings.asr_model,
+            source_model=runtime.settings.whisper_model,
             segment_count=0,
             substage=str(event.get("stage") or "").strip() or None,
             substage_label=str(event.get("message") or "").strip(),
@@ -163,13 +172,13 @@ async def ensure_transcript_data(state: IngestionState) -> IngestionState:
         on_progress=_handle_progress,
     )
     transcript_elapsed = perf_counter() - transcript_started
-    runtime.db.save_transcript(
+    await runtime.db.save_transcript(
         bvid=bvid,
         source_model=transcript_payload["model"],
         transcript_text=transcript_payload["text"],
         segments=transcript_payload["segments"],
     )
-    runtime.db.update_pipeline_step(
+    await runtime.db.update_pipeline_step(
         bvid,
         "transcript",
         "done",
@@ -185,7 +194,7 @@ async def ensure_transcript_data(state: IngestionState) -> IngestionState:
         transcript_elapsed,
     )
     return {
-        "transcript": runtime.db.get_transcript(bvid),
+        "transcript": await runtime.db.get_transcript(bvid),
         "current_step": "index",
     }
 
@@ -193,11 +202,12 @@ async def ensure_transcript_data(state: IngestionState) -> IngestionState:
 async def build_index_segments(state: IngestionState) -> IngestionState:
     runtime = state["runtime"]
     bvid = state["bvid"]
-    transcript = state.get("transcript") or runtime.db.get_transcript(bvid)
+    logger.info("[%s] Building index segments...", bvid)
+    transcript = state.get("transcript") or await runtime.db.get_transcript(bvid)
     if not transcript:
         raise RuntimeError("没有找到可用于建索引的转写文本。")
 
-    runtime.db.update_pipeline_step(
+    await runtime.db.update_pipeline_step(
         bvid,
         "index",
         "running",
@@ -229,7 +239,8 @@ async def embed_index_segments(state: IngestionState) -> IngestionState:
     runtime = state["runtime"]
     bvid = state["bvid"]
     merged_segments = state.get("merged_segments") or []
-    runtime.db.update_pipeline_step(
+    logger.info("[%s] Embedding %s segments...", bvid, len(merged_segments))
+    await runtime.db.update_pipeline_step(
         bvid,
         "index",
         "running",
@@ -238,9 +249,13 @@ async def embed_index_segments(state: IngestionState) -> IngestionState:
         model=runtime.settings.embedding_model,
         count=len(merged_segments),
     )
-    embeddings = await runtime.embedder.embed_texts([segment["content"] for segment in merged_segments])
+    embeddings = await runtime.embedder.embed_texts(
+        [segment["content"] for segment in merged_segments]
+    )
     chunk_rows: list[dict[str, object]] = []
-    for index, (segment, embedding) in enumerate(zip(merged_segments, embeddings, strict=False)):
+    for index, (segment, embedding) in enumerate(
+        zip(merged_segments, embeddings, strict=False)
+    ):
         chunk_rows.append(
             {
                 "chunk_id": f"{bvid}-idx-{index}",
@@ -259,35 +274,41 @@ async def embed_index_segments(state: IngestionState) -> IngestionState:
 async def upsert_index_chunks(state: IngestionState) -> IngestionState:
     runtime = state["runtime"]
     bvid = state["bvid"]
-    video = state["video"] or require_video(runtime, bvid)
+    video = state["video"] or await require_video(runtime, bvid)
     chunk_rows = state.get("chunk_rows") or []
-
-    runtime.db.update_pipeline_step(
+    logger.info("[%s] Upserting %s chunks to vector store...", bvid, len(chunk_rows))
+    await runtime.db.update_pipeline_step(
         bvid,
         "index",
         "running",
-        substage="milvus_upsert",
-        substage_label="正在写入 Milvus",
+        substage="vector_upsert",
+        substage_label="正在写入向量库",
         model=runtime.settings.embedding_model,
         count=len(chunk_rows),
     )
-    runtime.vector_store.replace_video_chunks(
+    await runtime.vector_store.areplace_video_chunks(
         folder_id=int(video["folder_id"]),
         bvid=bvid,
         video_title=video["title"],
         up_name=video.get("up_name"),
-        transcript_source=str((runtime.db.get_transcript(bvid) or {}).get("source_model") or runtime.settings.asr_model),
+        transcript_source=str(
+            (await runtime.db.get_transcript(bvid) or {}).get("source_model")
+            or runtime.settings.whisper_model
+        ),
         manual_tags=video.get("manual_tags") or [],
         chunks=chunk_rows,
     )
-    runtime.db.mark_video_processed(
+    await runtime.db.mark_video_processed(
         bvid=bvid,
         cid=int(video["cid"]) if video.get("cid") else None,
-        transcript_source=str((runtime.db.get_transcript(bvid) or {}).get("source_model") or runtime.settings.asr_model),
+        transcript_source=str(
+            (await runtime.db.get_transcript(bvid) or {}).get("source_model")
+            or runtime.settings.whisper_model
+        ),
         audio_storage_provider=video.get("audio_storage_provider"),
         audio_object_key=video.get("audio_object_key"),
     )
-    runtime.db.update_pipeline_step(
+    await runtime.db.update_pipeline_step(
         bvid,
         "index",
         "done",
@@ -297,7 +318,7 @@ async def upsert_index_chunks(state: IngestionState) -> IngestionState:
         count=len(chunk_rows),
     )
     return {
-        "video": require_video(runtime, bvid),
+        "video": await require_video(runtime, bvid),
         "current_step": "index",
     }
 
@@ -307,8 +328,11 @@ async def maybe_generate_summary(state: IngestionState) -> IngestionState:
         return {}
 
     runtime = state["runtime"]
+    bvid = state["bvid"]
     try:
-        await ensure_video_summary(runtime, state["bvid"])
-    except Exception:
-        return {}
+        logger.info("[%s] Generating summary...", bvid)
+        await ensure_video_summary(runtime, bvid)
+        logger.info("[%s] Summary generated successfully", bvid)
+    except Exception as exc:
+        logger.warning("[%s] Summary generation failed: %s", bvid, exc)
     return {}

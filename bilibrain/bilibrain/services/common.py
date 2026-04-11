@@ -21,7 +21,7 @@ INDEX_SUBSTAGE_LABELS = {
     None: "",
     "chunking": "正在切分文本",
     "embedding": "正在生成向量",
-    "milvus_upsert": "正在写入 Milvus",
+    "vector_upsert": "正在写入向量库",
 }
 TOPIC_SIGNALS = (
     "好那",
@@ -397,29 +397,10 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
     return dot / (left_norm * right_norm)
 
 
-def rank_chunks(
-    *,
-    query: str,
-    query_embedding: list[float],
-    chunks: list[dict[str, Any]],
-    limit: int = 6,
-) -> list[dict[str, Any]]:
-    query_terms = extract_terms(query)
-    scored: list[dict[str, Any]] = []
-
-    for chunk in chunks:
-        combined_text = f"{chunk['video_title']} {chunk['content']}"
-        chunk_terms = extract_terms(combined_text)
-        overlap = len(query_terms & chunk_terms)
-        keyword_score = overlap / max(len(query_terms), 1)
-        dense_score = cosine_similarity(query_embedding, chunk["embedding"])
-        total_score = dense_score * 0.75 + keyword_score * 0.25
-        if total_score <= 0:
-            continue
-        scored.append({**chunk, "score": total_score})
-
-    scored.sort(key=lambda item: item["score"], reverse=True)
-    return scored[:limit]
+def _keyword_overlap_score(query_terms: set[str], text: str) -> float:
+    text_terms = extract_terms(text)
+    overlap = len(query_terms & text_terms)
+    return overlap / max(len(query_terms), 1)
 
 
 def rerank_search_hits(
@@ -433,9 +414,7 @@ def rerank_search_hits(
 
     for hit in hits:
         combined_text = f"{hit.get('video_title', '')} {hit.get('content', '')}"
-        hit_terms = extract_terms(combined_text)
-        overlap = len(query_terms & hit_terms)
-        keyword_score = overlap / max(len(query_terms), 1)
+        keyword_score = _keyword_overlap_score(query_terms, combined_text)
         dense_score = float(hit.get("score") or 0.0)
         total_score = dense_score * 0.85 + keyword_score * 0.15
         if total_score <= 0:
@@ -443,125 +422,6 @@ def rerank_search_hits(
         rescored.append({**hit, "score": total_score})
 
     rescored.sort(key=lambda item: item["score"], reverse=True)
-    return rescored[:limit]
-
-
-def rank_bm25_chunks(
-    *,
-    query: str,
-    chunks: list[dict[str, Any]],
-    limit: int = 40,
-    k1: float = 1.5,
-    b: float = 0.75,
-) -> list[dict[str, Any]]:
-    if not chunks:
-        return []
-
-    query_terms = extract_terms(query)
-    if not query_terms:
-        return []
-
-    documents: list[tuple[dict[str, Any], list[str]]] = []
-    doc_freq: dict[str, int] = {}
-    total_length = 0
-
-    for chunk in chunks:
-        combined_text = f"{chunk.get('video_title', '')} {chunk.get('manual_tags', '')} {chunk.get('content', '')}"
-        terms = list(extract_terms(combined_text))
-        if not terms:
-            continue
-        documents.append((chunk, terms))
-        total_length += len(terms)
-        unique_terms = set(terms)
-        for term in unique_terms:
-            doc_freq[term] = doc_freq.get(term, 0) + 1
-
-    if not documents:
-        return []
-
-    avg_doc_len = total_length / max(len(documents), 1)
-    scored: list[dict[str, Any]] = []
-    total_docs = len(documents)
-
-    for chunk, terms in documents:
-        term_counts: dict[str, int] = {}
-        for term in terms:
-            term_counts[term] = term_counts.get(term, 0) + 1
-
-        score = 0.0
-        doc_len = len(terms)
-        for term in query_terms:
-            freq = term_counts.get(term, 0)
-            if freq <= 0:
-                continue
-            df = doc_freq.get(term, 0)
-            idf = math.log(1 + ((total_docs - df + 0.5) / (df + 0.5)))
-            denom = freq + k1 * (1 - b + b * (doc_len / max(avg_doc_len, 1)))
-            score += idf * ((freq * (k1 + 1)) / max(denom, 1e-9))
-
-        if score <= 0:
-            continue
-        scored.append({**chunk, "bm25_score": score, "score": score})
-
-    scored.sort(key=lambda item: float(item.get("bm25_score") or 0.0), reverse=True)
-    return scored[:limit]
-
-
-def hybrid_rerank_hits(
-    *,
-    query: str,
-    dense_hits: list[dict[str, Any]],
-    bm25_hits: list[dict[str, Any]],
-    limit: int = 10,
-) -> list[dict[str, Any]]:
-    combined: dict[str, dict[str, Any]] = {}
-    dense_max = max((float(hit.get("score") or 0.0) for hit in dense_hits), default=0.0)
-    bm25_max = max((float(hit.get("bm25_score") or hit.get("score") or 0.0) for hit in bm25_hits), default=0.0)
-    query_terms = extract_terms(query)
-
-    for hit in dense_hits:
-        chunk_id = str(hit.get("chunk_id") or "")
-        if not chunk_id:
-            continue
-        combined[chunk_id] = {
-            **hit,
-            "dense_score": float(hit.get("score") or 0.0),
-            "bm25_score": 0.0,
-        }
-
-    for hit in bm25_hits:
-        chunk_id = str(hit.get("chunk_id") or "")
-        if not chunk_id:
-            continue
-        existing = combined.get(chunk_id, {**hit, "dense_score": 0.0})
-        existing["bm25_score"] = float(hit.get("bm25_score") or hit.get("score") or 0.0)
-        for key, value in hit.items():
-            existing.setdefault(key, value)
-        combined[chunk_id] = existing
-
-    rescored: list[dict[str, Any]] = []
-    for item in combined.values():
-        combined_text = f"{item.get('video_title', '')} {item.get('manual_tags', '')} {item.get('content', '')}"
-        hit_terms = extract_terms(combined_text)
-        overlap = len(query_terms & hit_terms)
-        keyword_score = overlap / max(len(query_terms), 1)
-        dense_score = float(item.get("dense_score") or 0.0)
-        bm25_score = float(item.get("bm25_score") or 0.0)
-        normalized_dense = dense_score / dense_max if dense_max > 0 else 0.0
-        normalized_bm25 = bm25_score / bm25_max if bm25_max > 0 else 0.0
-        total_score = normalized_dense * 0.5 + normalized_bm25 * 0.35 + keyword_score * 0.15
-        if total_score <= 0:
-            continue
-        rescored.append(
-            {
-                **item,
-                "score": total_score,
-                "dense_score": dense_score,
-                "bm25_score": bm25_score,
-            }
-        )
-
-    rescored.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
     return rescored[:limit]
 
 

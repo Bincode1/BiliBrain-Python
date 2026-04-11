@@ -14,17 +14,19 @@ from bilibrain.services.summary import (
 async def load_summary_context(state: SummaryState) -> SummaryState:
     runtime = state["runtime"]
     bvid = state["bvid"]
-    transcript = runtime.db.get_transcript(bvid)
+    transcript = await runtime.db.get_transcript(bvid)
     if not transcript:
         return {
             "transcript": None,
-            "video": runtime.db.get_video(bvid),
+            "video": await runtime.db.get_video(bvid),
         }
     return {
         "transcript": transcript,
-        "video": runtime.db.get_video(bvid),
-        "transcript_hash": compute_transcript_hash(str(transcript.get("transcript_text") or "")),
-        "existing_summary": runtime.db.get_video_summary(bvid),
+        "video": await runtime.db.get_video(bvid),
+        "transcript_hash": compute_transcript_hash(
+            str(transcript.get("transcript_text") or "")
+        ),
+        "existing_summary": await runtime.db.get_video_summary(bvid),
     }
 
 
@@ -43,7 +45,9 @@ async def prepare_summary_segments(state: SummaryState) -> SummaryState:
         overlap_chars=runtime.settings.transcript_chunk_overlap_chars,
         max_tokens=runtime.settings.transcript_chunk_max_tokens,
     )
-    total_chars = sum(len(str(segment.get("content") or "")) for segment in merged_segments)
+    total_chars = sum(
+        len(str(segment.get("content") or "")) for segment in merged_segments
+    )
     return {
         "merged_segments": merged_segments,
         "total_chars": total_chars,
@@ -96,7 +100,7 @@ async def save_summary_result(state: SummaryState) -> SummaryState:
     transcript_hash = str(state.get("transcript_hash") or "").strip()
     if not summary_text or not transcript_hash:
         return {}
-    runtime.db.save_video_summary(
+    await runtime.db.save_video_summary(
         bvid=state["bvid"],
         transcript_hash=transcript_hash,
         summary_text=summary_text,

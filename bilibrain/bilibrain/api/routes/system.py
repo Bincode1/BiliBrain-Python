@@ -22,10 +22,16 @@ async def health() -> dict[str, str]:
 
 
 @router.get("/api/settings")
-async def get_settings_payload(runtime: Runtime = Depends(get_runtime)) -> dict[str, int]:
-    return runtime.db.get_processing_settings()
+async def get_settings_payload(
+    runtime: Runtime = Depends(get_runtime),
+) -> dict[str, int]:
+    return await runtime.db.get_processing_settings()
 
 
 @router.post("/api/settings")
-async def update_settings(payload: SettingsRequest, runtime: Runtime = Depends(get_runtime)) -> dict[str, int]:
-    return runtime.db.save_processing_settings(max_video_minutes=payload.max_video_minutes)
+async def update_settings(
+    payload: SettingsRequest, runtime: Runtime = Depends(get_runtime)
+) -> dict[str, int]:
+    return await runtime.db.save_processing_settings(
+        max_video_minutes=payload.max_video_minutes
+    )

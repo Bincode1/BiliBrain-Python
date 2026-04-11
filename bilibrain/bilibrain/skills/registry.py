@@ -1,53 +1,53 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
-from bilibrain.skills.contracts import SkillDescriptor, SkillManifest, SkillSourceConfig
+from bilibrain.skills.contracts import SkillDescriptor, SkillManifest
+from bilibrain.skills.errors import SkillParseError
 from bilibrain.skills.parser import parse_skill_file
+
+logger = logging.getLogger(__name__)
 
 
 class SkillRegistry:
-    def __init__(self, *, source_configs: list[SkillSourceConfig] | None = None) -> None:
-        self.source_configs = source_configs or []
+    def __init__(self, *, root: Path) -> None:
+        self.root = root
         self._skills: dict[str, SkillManifest] = {}
 
     def reload(self) -> dict[str, SkillManifest]:
         skills: dict[str, SkillManifest] = {}
-        for source_config in sorted(self.source_configs, key=lambda item: item.precedence):
-            if not source_config.enabled:
-                continue
-            root = Path(source_config.root)
-            if not root.exists():
-                continue
-            for skill_file in sorted(root.rglob("SKILL.md")):
+        if not self.root.exists():
+            self._skills = skills
+            return dict(self._skills)
+        for skill_file in sorted(self.root.rglob("SKILL.md")):
+            try:
                 parsed = parse_skill_file(skill_file)
-                descriptor = SkillManifest(
-                    name=parsed.name,
-                    description=parsed.description,
-                    source=source_config.source,
-                    skill_path=str(skill_file),
-                    directory_path=str(skill_file.parent),
-                    allow_model_invocation=parsed.allow_model_invocation,
-                    allowed_tools=parsed.allowed_tools,
-                    requires=parsed.requires,
-                    metadata=parsed.metadata,
-                    resources=_collect_skill_resources(skill_file.parent),
-                    precedence=source_config.precedence,
-                    body=parsed.body,
-                    source_root=str(root),
-                )
-                skills[descriptor.name] = descriptor
+            except SkillParseError:
+                logger.warning("Skipping invalid skill file: %s", skill_file)
+                continue
+            manifest = SkillManifest(
+                name=parsed.name,
+                description=parsed.description,
+                skill_path=str(skill_file),
+                directory_path=str(skill_file.parent),
+                allow_model_invocation=parsed.allow_model_invocation,
+                allowed_tools=parsed.allowed_tools,
+                requires=parsed.requires,
+                metadata=parsed.metadata,
+                resources=_collect_skill_resources(skill_file.parent),
+                body=parsed.body,
+            )
+            skills[manifest.name] = manifest
         self._skills = skills
         return dict(self._skills)
 
     def list_skills(self) -> list[SkillDescriptor]:
         if not self._skills:
             self.reload()
-        return [SkillDescriptor(**skill.model_dump(exclude={"body", "source_root"})) for skill in self._skills.values()]
+        return [SkillDescriptor(**skill.model_dump(exclude={"body"})) for skill in self._skills.values()]
 
     def get_skill(self, name: str) -> SkillManifest | None:
-        if not self._skills:
-            self.reload()
         return self._skills.get(name)
 
 

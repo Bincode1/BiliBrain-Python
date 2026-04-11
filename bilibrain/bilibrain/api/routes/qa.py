@@ -7,13 +7,15 @@ from bilibrain.api.deps import get_runtime
 from bilibrain.core.runtime import Runtime
 from bilibrain.schemas.requests import AskRequest, ChatConversationCreateRequest, ChatConversationRenameRequest
 from bilibrain.services.qa import (
-    answer_question,
     create_chat_conversation,
     delete_chat_conversation,
     get_chat_history,
     list_chat_conversations,
     rename_chat_conversation,
-    stream_answer_events,
+)
+from bilibrain.services.unified_agent import (
+    answer_with_unified_agent,
+    stream_unified_agent_events,
 )
 
 
@@ -60,28 +62,30 @@ async def chat_conversations_rename(
 
 @router.post("/api/ask")
 async def ask(payload: AskRequest, runtime: Runtime = Depends(get_runtime)) -> dict[str, object]:
-    return await answer_question(
+    return await answer_with_unified_agent(
         runtime,
-        payload.query,
-        payload.folder_id,
-        payload.bvid,
-        payload.scope_mode,
-        payload.conversation_id,
-        payload.deep_research,
+        query=payload.query,
+        folder_id=payload.folder_id,
+        bvid=payload.bvid,
+        scope_mode=payload.scope_mode,
+        conversation_id=payload.conversation_id,
+        approval_mode=payload.approval_mode,
+        actor=payload.actor,
     )
 
 
 @router.post("/api/ask/stream")
 async def ask_stream(payload: AskRequest, runtime: Runtime = Depends(get_runtime)) -> StreamingResponse:
     return StreamingResponse(
-        stream_answer_events(
+        stream_unified_agent_events(
             runtime,
-            payload.query,
-            payload.folder_id,
-            payload.bvid,
-            payload.scope_mode,
-            payload.conversation_id,
-            payload.deep_research,
+            query=payload.query,
+            folder_id=payload.folder_id,
+            bvid=payload.bvid,
+            scope_mode=payload.scope_mode,
+            conversation_id=payload.conversation_id,
+            approval_mode=payload.approval_mode,
+            actor=payload.actor,
         ),
         media_type="text/event-stream",
         headers={

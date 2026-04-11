@@ -158,10 +158,13 @@ async def run_qa_graph_stream(
                     if custom_data.get("_answer_token"):
                         delta = custom_data["_answer_token"]
                         yield f"event: answer\ndata: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n"
+                    if custom_data.get("_answer_normalized"):
+                        yield make_sse_event("answer_normalized", {"text": custom_data["_answer_normalized"]})
 
             elif chunk_type == "updates":
-                node_name = chunk.get("node")
-                node_data = chunk.get("data") or {}
+                raw_data = chunk.get("data") or {}
+                node_name = next(iter(raw_data), None)
+                node_data = raw_data[node_name] if node_name else {}
 
                 if node_name == "resolve_scope" and not conversation_id_sent:
                     conv_id = node_data.get("conversation_id")
@@ -188,7 +191,7 @@ def _determine_answer_mode(state: QAState) -> str | None:
     route_mode = state.get("route_mode")
     sources = state.get("sources") or []
 
-    if route_mode == "history_only":
+    if route_mode == "direct":
         return None
 
     if sources:

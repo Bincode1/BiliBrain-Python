@@ -38,7 +38,7 @@ def get_workspace_root(base_root: Path, workspace_id: str) -> Path:
     return workspace_path
 
 
-def create_workspace_session(
+async def create_workspace_session(
     db: Any,
     *,
     feature_name: str,
@@ -48,7 +48,7 @@ def create_workspace_session(
 ) -> dict[str, Any]:
     workspace_id = uuid4().hex[:12]
     scope_key = f"{feature_name}:{conversation_id}" if conversation_id else feature_name
-    return db.create_tool_workspace(
+    return await db.create_tool_workspace(
         workspace_id=workspace_id,
         scope_key=scope_key,
         feature_name=feature_name,

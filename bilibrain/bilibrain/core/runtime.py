@@ -4,16 +4,13 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
-from langgraph.checkpoint.memory import InMemorySaver
-
-from bilibrain.ai import AsrClient, EmbeddingClient, QwenClient
+from bilibrain.ai import EmbeddingClient, QwenClient, WhisperAsrClient
 from bilibrain.core.config import Settings, get_settings
 from bilibrain.db.database import Database
-from bilibrain.services.research_retriever import TavilyMCPRetrievalAgent
 from bilibrain.skills.service import SkillService, create_skill_service
-from bilibrain.db.vector_store import MilvusStore
+from bilibrain.db.vector_store import LocalVectorStore
 from bilibrain.services.bilibili import BilibiliClient
-from bilibrain.storage import AudioStorageService, create_audio_storage_service
+from bilibrain.storage import AudioStorageService
 from bilibrain.tools.service import ToolService, create_tool_service
 
 
@@ -24,9 +21,9 @@ class Runtime:
     bili: BilibiliClient
     embedder: EmbeddingClient
     qwen: QwenClient
-    asr: AsrClient
+    asr: WhisperAsrClient
     audio_storage: AudioStorageService
-    vector_store: MilvusStore
+    vector_store: LocalVectorStore
     video_tasks: dict[str, asyncio.Task[Any]] = field(default_factory=dict)
     reset_tasks: dict[str, asyncio.Task[Any]] = field(default_factory=dict)
     reset_statuses: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -37,8 +34,6 @@ class Runtime:
     reset_limiter: asyncio.Semaphore | None = None
     tool_service: ToolService | None = None
     skill_service: SkillService | None = None
-    skill_agent_checkpointer: InMemorySaver | None = None
-    research_retriever: TavilyMCPRetrievalAgent | None = None
 
     def track_cache_task(self, key: str, task: asyncio.Task[Any]) -> None:
         """Track a cache task with automatic cleanup on completion."""
@@ -71,14 +66,16 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         bili=BilibiliClient(resolved_settings, db),
         embedder=EmbeddingClient(resolved_settings),
         qwen=QwenClient(resolved_settings),
-        asr=AsrClient(resolved_settings),
-        audio_storage=create_audio_storage_service(resolved_settings),
-        vector_store=MilvusStore(resolved_settings),
+        asr=WhisperAsrClient(resolved_settings),
+        audio_storage=AudioStorageService(resolved_settings),
+        vector_store=LocalVectorStore(resolved_settings),
     )
 
 
 def build_worker_id(prefix: str = "app") -> str:
-    from bilibrain.services.ingestion_dispatcher import build_worker_id as _build_worker_id
+    from bilibrain.services.ingestion_dispatcher import (
+        build_worker_id as _build_worker_id,
+    )
 
     return _build_worker_id(prefix)
 
@@ -91,7 +88,9 @@ async def run_ingestion_dispatcher(
     max_concurrency: int,
     stale_after_seconds: int,
 ) -> None:
-    from bilibrain.services.ingestion_dispatcher import run_ingestion_dispatcher as _run_ingestion_dispatcher
+    from bilibrain.services.ingestion_dispatcher import (
+        run_ingestion_dispatcher as _run_ingestion_dispatcher,
+    )
 
     await _run_ingestion_dispatcher(
         runtime,
@@ -103,18 +102,20 @@ async def run_ingestion_dispatcher(
 
 
 async def startup_runtime(runtime: Runtime) -> None:
-    runtime.settings.audio_cache_dir.mkdir(parents=True, exist_ok=True)
+    runtime.settings.audio_dir.mkdir(parents=True, exist_ok=True)
+    runtime.settings.vector_db_dir.mkdir(parents=True, exist_ok=True)
     runtime.settings.tools_workspace_root.mkdir(parents=True, exist_ok=True)
-    runtime.settings.skills_builtin_root.mkdir(parents=True, exist_ok=True)
-    runtime.settings.skills_user_root.mkdir(parents=True, exist_ok=True)
-    runtime.settings.skills_repo_root.mkdir(parents=True, exist_ok=True)
-    runtime.db.ensure_ready()
+    runtime.settings.skills_root.mkdir(parents=True, exist_ok=True)
+    await runtime.db.ensure_ready()
     runtime.tool_service = create_tool_service(runtime.settings, runtime.db)
-    runtime.skill_service = create_skill_service(runtime.settings)
-    runtime.skill_agent_checkpointer = InMemorySaver()
-    runtime.research_retriever = TavilyMCPRetrievalAgent(runtime.settings)
+    runtime.skill_service = create_skill_service(runtime.settings, runtime.db)
+    # 从数据库加载激活的技能
+    if runtime.skill_service:
+        await runtime.skill_service._load_active_skills()
     runtime.ingestion_enqueue_lock = asyncio.Lock()
-    runtime.reset_limiter = asyncio.Semaphore(max(int(runtime.settings.reset_max_concurrency), 1))
+    runtime.reset_limiter = asyncio.Semaphore(
+        max(int(runtime.settings.reset_max_concurrency), 1)
+    )
     runtime.ingestion_worker_id = build_worker_id("app")
     runtime.ingestion_dispatcher_task = asyncio.create_task(
         run_ingestion_dispatcher(

@@ -45,25 +45,16 @@ def _command_prefixes(name: str, default: tuple[tuple[str, ...], ...]) -> tuple[
 @dataclass(frozen=True)
 class Settings:
     app_name: str
-    mysql_host: str
-    mysql_port: int
-    mysql_user: str
-    mysql_password: str
-    mysql_database: str
-    milvus_host: str
-    milvus_port: int
-    milvus_user: str
-    milvus_password: str
-    milvus_database: str
-    milvus_collection: str
-    milvus_dimension: int
-    tavily_api_key: str
-    tavily_mcp_url: str
+    data_dir: Path
+    chroma_collection: str
+    embedding_dimension: int
+    whisper_model: str
+    whisper_device: str
+    whisper_compute_type: str
     dashscope_api_key: str
     dashscope_base_url: str
     llm_model: str
     planner_llm_model: str
-    asr_model: str
     asr_language: str
     asr_chunk_seconds: int
     asr_target_chunk_seconds: int
@@ -74,16 +65,6 @@ class Settings:
     ollama_base_url: str
     embedding_model: str
     bili_api_delay: float
-    audio_storage_provider: str
-    audio_storage_bucket: str
-    audio_storage_prefix: str
-    audio_storage_endpoint: str
-    audio_storage_region: str
-    audio_storage_access_key: str
-    audio_storage_secret_key: str
-    audio_storage_public_base_url: str
-    audio_storage_presign_seconds: int
-    audio_storage_force_path_style: bool
     session_cache_ttl_seconds: int
     folder_list_cache_ttl_seconds: int
     folder_videos_cache_ttl_seconds: int
@@ -128,35 +109,33 @@ class Settings:
     tools_docker_pids_limit: int
     tools_docker_tmpfs_size_mb: int
     skills_enabled: bool
-    skills_builtin_root: Path
-    skills_user_root: Path
-    skills_repo_root: Path
-    skills_user_enabled: bool
-    skills_repo_enabled: bool
-    skills_trust_repo: bool
-    audio_cache_dir: Path
+    skills_root: Path
     frontend_dist_dir: Path
     index_file: Path
+
+    @property
+    def db_path(self) -> Path:
+        return self.data_dir / "db" / "user_data.db"
+
+    @property
+    def vector_db_dir(self) -> Path:
+        return self.data_dir / "vector_db"
+
+    @property
+    def audio_dir(self) -> Path:
+        return self.data_dir / "audio"
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings(
         app_name=os.getenv("APP_NAME", "BiliBrain"),
-        mysql_host=os.getenv("MYSQL_HOST", "127.0.0.1"),
-        mysql_port=_int("MYSQL_PORT", 3306),
-        mysql_user=os.getenv("MYSQL_USER", "root"),
-        mysql_password=os.getenv("MYSQL_PASSWORD", ""),
-        mysql_database=os.getenv("MYSQL_DATABASE", "bilibrain"),
-        milvus_host=os.getenv("MILVUS_HOST", "127.0.0.1"),
-        milvus_port=_int("MILVUS_PORT", 19530),
-        milvus_user=os.getenv("MILVUS_USER", ""),
-        milvus_password=os.getenv("MILVUS_PASSWORD", ""),
-        milvus_database=os.getenv("MILVUS_DATABASE", "default"),
-        milvus_collection=os.getenv("MILVUS_COLLECTION", "bili_chunks"),
-        milvus_dimension=_int("MILVUS_DIMENSION", 1024),
-        tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
-        tavily_mcp_url=os.getenv("TAVILY_MCP_URL", "https://mcp.tavily.com/mcp/").strip().rstrip("/"),
+        data_dir=WORKSPACE_DIR / os.getenv("DATA_DIR", "data"),
+        chroma_collection=os.getenv("CHROMA_COLLECTION", "bili_chunks"),
+        embedding_dimension=_int("EMBEDDING_DIMENSION", 1024),
+        whisper_model=os.getenv("WHISPER_MODEL", "medium"),
+        whisper_device=os.getenv("WHISPER_DEVICE", "cpu"),
+        whisper_compute_type=os.getenv("WHISPER_COMPUTE_TYPE", "int8"),
         dashscope_api_key=os.getenv("DASHSCOPE_API_KEY", "").strip(),
         dashscope_base_url=os.getenv(
             "DASHSCOPE_BASE_URL",
@@ -164,7 +143,6 @@ def get_settings() -> Settings:
         ).rstrip("/"),
         llm_model=os.getenv("LLM_MODEL", "qwen-plus"),
         planner_llm_model=os.getenv("PLANNER_LLM_MODEL", os.getenv("LLM_MODEL", "qwen-plus")).strip(),
-        asr_model=os.getenv("ASR_MODEL", "qwen3-asr-flash"),
         asr_language=os.getenv("ASR_LANGUAGE", "zh").strip(),
         asr_chunk_seconds=_int("ASR_CHUNK_SECONDS", 120),
         asr_target_chunk_seconds=_int("ASR_TARGET_CHUNK_SECONDS", 90),
@@ -173,18 +151,8 @@ def get_settings() -> Settings:
         asr_silence_min_seconds=_float("ASR_SILENCE_MIN_SECONDS", 0.6),
         asr_silence_noise_db=_float("ASR_SILENCE_NOISE_DB", -35.0),
         ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
-        embedding_model=os.getenv("EMBEDDING_MODEL", "qwen3-embedding"),
+        embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-v4"),
         bili_api_delay=_float("BILI_API_DELAY", 1.0),
-        audio_storage_provider=os.getenv("AUDIO_STORAGE_PROVIDER", "local").strip().lower(),
-        audio_storage_bucket=os.getenv("AUDIO_STORAGE_BUCKET", "bilibrain-audio").strip(),
-        audio_storage_prefix=os.getenv("AUDIO_STORAGE_PREFIX", "audio").strip().strip("/"),
-        audio_storage_endpoint=os.getenv("AUDIO_STORAGE_ENDPOINT", "").strip().rstrip("/"),
-        audio_storage_region=os.getenv("AUDIO_STORAGE_REGION", "us-east-1").strip(),
-        audio_storage_access_key=os.getenv("AUDIO_STORAGE_ACCESS_KEY", "").strip(),
-        audio_storage_secret_key=os.getenv("AUDIO_STORAGE_SECRET_KEY", "").strip(),
-        audio_storage_public_base_url=os.getenv("AUDIO_STORAGE_PUBLIC_BASE_URL", "").strip().rstrip("/"),
-        audio_storage_presign_seconds=_int("AUDIO_STORAGE_PRESIGN_SECONDS", 3600),
-        audio_storage_force_path_style=_bool("AUDIO_STORAGE_FORCE_PATH_STYLE", True),
         session_cache_ttl_seconds=_int("SESSION_CACHE_TTL_SECONDS", 60),
         folder_list_cache_ttl_seconds=_int("FOLDER_LIST_CACHE_TTL_SECONDS", 300),
         folder_videos_cache_ttl_seconds=_int("FOLDER_VIDEOS_CACHE_TTL_SECONDS", 300),
@@ -255,13 +223,7 @@ def get_settings() -> Settings:
         tools_docker_pids_limit=_int("TOOLS_DOCKER_PIDS_LIMIT", 128),
         tools_docker_tmpfs_size_mb=_int("TOOLS_DOCKER_TMPFS_SIZE_MB", 64),
         skills_enabled=_bool("SKILLS_ENABLED", True),
-        skills_builtin_root=BASE_DIR / "bilibrain" / os.getenv("SKILLS_BUILTIN_ROOT", "builtin_skills"),
-        skills_user_root=Path(os.getenv("SKILLS_USER_ROOT", str(Path.home() / ".bilibrain" / "skills"))),
-        skills_repo_root=WORKSPACE_DIR / os.getenv("SKILLS_REPO_ROOT", ".agents/skills"),
-        skills_user_enabled=_bool("SKILLS_USER_ENABLED", True),
-        skills_repo_enabled=_bool("SKILLS_REPO_ENABLED", True),
-        skills_trust_repo=_bool("SKILLS_TRUST_REPO", True),
-        audio_cache_dir=BASE_DIR / "data" / "audio",
+        skills_root=WORKSPACE_DIR / os.getenv("SKILLS_ROOT", "skills"),
         frontend_dist_dir=WORKSPACE_DIR / "frontend" / "dist",
         index_file=(
             (WORKSPACE_DIR / "frontend" / "dist" / "index.html")

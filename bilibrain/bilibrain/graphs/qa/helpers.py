@@ -38,14 +38,16 @@ def should_use_planner(query: str) -> bool:
     return any(keyword in payload for keyword in PLANNER_HINT_KEYWORDS)
 
 
-def describe_query_scope(runtime: Any, *, folder_id: int | None, bvid: str | None, scope_mode: str | None) -> str:
+async def describe_query_scope(
+    runtime: Any, *, folder_id: int | None, bvid: str | None, scope_mode: str | None
+) -> str:
     scope = resolve_query_scope(folder_id=folder_id, bvid=bvid, scope_mode=scope_mode)
     if scope["scope"] == "video" and scope.get("bvid"):
-        video = runtime.db.get_video(str(scope["bvid"])) or {}
+        video = await runtime.db.get_video(str(scope["bvid"])) or {}
         title = str(video.get("title") or scope["bvid"])
         return f"当前范围是单个视频：{title}（bvid={scope['bvid']}）。"
     if scope["scope"] == "folder" and scope.get("folder_id") is not None:
-        folder = runtime.db.get_folder(int(scope["folder_id"])) or {}
+        folder = await runtime.db.get_folder(int(scope["folder_id"])) or {}
         title = str(folder.get("title") or f"收藏夹 {scope['folder_id']}")
         return f"当前范围是单个收藏夹：{title}（folder_id={scope['folder_id']}）。"
     return "当前范围是全部已入库内容。"
@@ -55,11 +57,15 @@ def build_empty_answer_message(scope: dict[str, Any]) -> str:
     if scope.get("scope") == "video":
         return "当前视频还没有可检索内容。请先完成处理，或切换到收藏夹 / 全部范围。"
     if scope.get("scope") == "folder":
-        return "当前收藏夹还没有可检索内容。请先处理其中至少一个视频，或切换到全部范围。"
+        return (
+            "当前收藏夹还没有可检索内容。请先处理其中至少一个视频，或切换到全部范围。"
+        )
     return "当前还没有可检索内容。请先完成至少一个视频的处理。"
 
 
-def resolve_effective_history(use_history: bool, context: dict[str, Any]) -> list[dict[str, Any]]:
+def resolve_effective_history(
+    use_history: bool, context: dict[str, Any]
+) -> list[dict[str, Any]]:
     if not use_history:
         return []
     return context.get("recent_history") or []
@@ -76,12 +82,17 @@ def _summary_total_chars(documents: list[dict[str, Any]]) -> int:
 
 
 def should_reduce_summary_documents(documents: list[dict[str, Any]]) -> bool:
-    if len(documents) <= SUMMARY_REDUCE_DOC_THRESHOLD and _summary_total_chars(documents) <= SUMMARY_REDUCE_CHAR_THRESHOLD:
+    if (
+        len(documents) <= SUMMARY_REDUCE_DOC_THRESHOLD
+        and _summary_total_chars(documents) <= SUMMARY_REDUCE_CHAR_THRESHOLD
+    ):
         return False
     return True
 
 
-def build_sources(matches: list[dict[str, Any]], *, limit: int | None = None) -> list[dict[str, str]]:
+def build_sources(
+    matches: list[dict[str, Any]], *, limit: int | None = None
+) -> list[dict[str, str]]:
     sources: list[dict[str, str]] = []
     for index, item in enumerate(matches, start=1):
         sources.append(
@@ -102,8 +113,12 @@ def build_sources(matches: list[dict[str, Any]], *, limit: int | None = None) ->
     return sources
 
 
-def filter_indexed_hits(runtime: Any, hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    statuses = runtime.db.get_pipeline_overall_statuses([str(hit.get("bvid") or "") for hit in hits])
+async def filter_indexed_hits(
+    runtime: Any, hits: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    statuses = await runtime.db.get_pipeline_overall_statuses(
+        [str(hit.get("bvid") or "") for hit in hits]
+    )
     filtered: list[dict[str, Any]] = []
     for hit in hits:
         if statuses.get(str(hit["bvid"]), "pending") == "indexed":

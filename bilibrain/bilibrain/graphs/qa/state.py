@@ -21,7 +21,7 @@ class QAState(TypedDict, total=False):
 
     query_plan: Any
     route_mode: str | None
-    retrieval_mode: str | None
+    retrieval_strategy: str | None
     use_history: bool
 
     matches: list[dict[str, Any]]
@@ -76,4 +76,5 @@ def build_initial_qa_state(
         "use_summaries": False,
         "timings": {},
         "messages": [],
+        "retrieval_strategy": None,
     }
