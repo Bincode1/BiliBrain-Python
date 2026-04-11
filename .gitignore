@@ -1,41 +1,49 @@
+# Environment
+
+!.env.example
+# 禁止入库
+.claude/settings.local.json
 .env
-.claude/
-.venv/
-.pytest_cache/
-.idea/
+.env.local
+.env.*.local
+
+# 确保这些不被其他规则误排除
+!.claude/settings.json
+!.claude/commands/
+!.claude/skills/
+!CLAUDE.md
+!.mcp.json
+# Python
 __pycache__/
 *.pyc
+*.pyo
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
 
+# Project data
+data/
+volumes/
+*.zip
+
+# IDE
+.idea/
+.claude/
+
+# Frontend
 frontend/node_modules/
 frontend/dist/
 
-bilibrain/.venv/
-bilibrain/.env
-bilibrain/.impeccable.md
-bilibrain/a,json
-bilibrain/findings.md
-bilibrain/index.html
-bilibrain/introduction.md
-bilibrain/plan.md
-bilibrain/progress.md
-bilibrain/task_plan.md
-bilibrain/uv.lock
-bilibrain/data/
-bilibrain/docs/
-bilibrain/volumes/
-bilibrain/datasets/README.md
-docs/tools-runtime-architecture.md
-.gitignore
-docs/skills-systems-research.md
-docs/plans/2026-03-24-langgraph-refactor.md
-docs/plans/2026-03-25-ai-workbench-shell-and-marketplace-navigation.md
-docs/plans/2026-03-25-external-eval-adapter.md
-docs/plans/2026-03-25-ragas-rag-evaluation.md
-docs/plans/2026-03-26-agent-tool-runtime-and-filesystem.md
-docs/plans/2026-03-27-deep-research-graph.md
-docs/plans/2026-03-27-video-classification-workflow.md
-findings.md
-bilibrain/eval_runner/README.md
-.gitignore
-README.md
-frontend/vite-4173.log
+# Temp
+*.log
+
+# Local project artifacts
+.agents/
+.kilo/
+.trae/
+plan/
+image.png
+nul
+CLAUDE.md
+bilibrain/test_debug.db
