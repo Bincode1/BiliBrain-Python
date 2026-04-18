@@ -42,6 +42,18 @@ def _command_prefixes(name: str, default: tuple[tuple[str, ...], ...]) -> tuple[
     return tuple(prefixes)
 
 
+def _patterns(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    parts: list[str] = []
+    for raw_part in value.replace(";", ",").split(","):
+        normalized = raw_part.strip()
+        if normalized:
+            parts.append(normalized)
+    return tuple(parts)
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str
@@ -110,6 +122,11 @@ class Settings:
     tools_docker_tmpfs_size_mb: int
     skills_enabled: bool
     skills_root: Path
+    skills_policy_default_action: str
+    skills_policy_allow_patterns: tuple[str, ...]
+    skills_policy_ask_patterns: tuple[str, ...]
+    skills_policy_deny_patterns: tuple[str, ...]
+    skills_policy_overrides: str
     frontend_dist_dir: Path
     index_file: Path
 
@@ -224,6 +241,11 @@ def get_settings() -> Settings:
         tools_docker_tmpfs_size_mb=_int("TOOLS_DOCKER_TMPFS_SIZE_MB", 64),
         skills_enabled=_bool("SKILLS_ENABLED", True),
         skills_root=WORKSPACE_DIR / os.getenv("SKILLS_ROOT", "skills"),
+        skills_policy_default_action=os.getenv("SKILLS_POLICY_DEFAULT_ACTION", "allow").strip().lower(),
+        skills_policy_allow_patterns=_patterns("SKILLS_POLICY_ALLOW_PATTERNS", ()),
+        skills_policy_ask_patterns=_patterns("SKILLS_POLICY_ASK_PATTERNS", ()),
+        skills_policy_deny_patterns=_patterns("SKILLS_POLICY_DENY_PATTERNS", ()),
+        skills_policy_overrides=os.getenv("SKILLS_POLICY_OVERRIDES", "").strip(),
         frontend_dist_dir=WORKSPACE_DIR / "frontend" / "dist",
         index_file=(
             (WORKSPACE_DIR / "frontend" / "dist" / "index.html")

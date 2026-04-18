@@ -16,7 +16,6 @@ def test_build_skill_agent_prompt_contains_skills_and_workspace():
     runtime = SimpleNamespace(
         skill_service=SimpleNamespace(
             build_available_skills_prompt=lambda **_: "<available_skills><skill /></available_skills>",
-            build_active_skills_prompt=lambda **_: "<active_skills><skill /></active_skills>",
         ),
         tool_service=SimpleNamespace(
             list_tools=lambda: [
@@ -30,12 +29,14 @@ def test_build_skill_agent_prompt_contains_skills_and_workspace():
         runtime,
         session_id="conversation-1",
         workspace_id="skill-agent-1",
+        actor="skill-agent",
     )
 
     assert "conversation-1" not in prompt
     assert "skill-agent-1" in prompt
     assert "<available_skills>" in prompt
-    assert "<active_skills>" in prompt
+    assert "<active_skills>" not in prompt
+    assert "skill(name)" in prompt
     assert "read_file" in prompt
 
 
@@ -60,11 +61,8 @@ def test_answer_with_skill_agent_uses_conversation_and_workspace(monkeypatch):
             return {"conversation_id": conversation_id, "role": role, "content": content}
 
     class DummySkillService:
-        def build_available_skills_prompt(self, *, session_id=None):
+        def build_available_skills_prompt(self, *, session_id=None, actor="agent"):
             return "<available_skills />"
-
-        def build_active_skills_prompt(self, *, session_id):
-            return "<active_skills />"
 
         def get_active_skills(self, session_id):
             return [{"name": "workspace-coding", "source": "system", "body": "..."}]
@@ -88,7 +86,7 @@ def test_answer_with_skill_agent_uses_conversation_and_workspace(monkeypatch):
     monkeypatch.setattr(module, "build_langchain_tools", lambda *args, **kwargs: ["workspace-tool"])
 
     # Mock the agent loop to return a completed answer
-    async def fake_run_loop(runtime, *, messages, tools, event_callback=None):
+    async def fake_run_loop(runtime, *, messages, tools, session_id, actor, event_callback=None):
         return "技能代理回答", None
 
     monkeypatch.setattr(module, "_run_skill_agent_loop", fake_run_loop)
@@ -131,7 +129,6 @@ def test_answer_with_skill_agent_returns_pending_approval(monkeypatch):
         db=DummyDb(),
         skill_service=SimpleNamespace(
             build_available_skills_prompt=lambda **_: "<available_skills />",
-            build_active_skills_prompt=lambda **_: "<active_skills />",
             get_active_skills=lambda session_id: [],
         ),
         tool_service=SimpleNamespace(
@@ -146,7 +143,7 @@ def test_answer_with_skill_agent_returns_pending_approval(monkeypatch):
     monkeypatch.setattr(module, "build_langchain_tools", lambda *args, **kwargs: ["workspace-tool"])
 
     # Mock the agent loop to return a pending approval
-    async def fake_run_loop(runtime, *, messages, tools, event_callback=None):
+    async def fake_run_loop(runtime, *, messages, tools, session_id, actor, event_callback=None):
         return "", {
             "interrupt_id": "int-1",
             "action_requests": [
@@ -200,8 +197,8 @@ def test_resume_skill_agent_turn_returns_completed_response(monkeypatch):
         db=DummyDb(),
         skill_service=SimpleNamespace(
             build_available_skills_prompt=lambda **_: "<available_skills />",
-            build_active_skills_prompt=lambda **_: "<active_skills />",
             get_active_skills=lambda session_id: [{"name": "workspace-coding"}],
+            approve_skill=lambda **kwargs: None,
         ),
         tool_service=SimpleNamespace(
             list_tools=lambda: [{"name": "run_command", "description": "Run command", "enabled": True}],
@@ -224,7 +221,7 @@ def test_resume_skill_agent_turn_returns_completed_response(monkeypatch):
 
     monkeypatch.setattr(module, "_build_tool_executor", fake_build_tool_executor)
 
-    async def fake_run_loop(runtime, *, messages, tools, event_callback=None):
+    async def fake_run_loop(runtime, *, messages, tools, session_id, actor, event_callback=None):
         return "恢复执行完成", None
 
     monkeypatch.setattr(module, "_run_skill_agent_loop", fake_run_loop)
@@ -241,6 +238,51 @@ def test_resume_skill_agent_turn_returns_completed_response(monkeypatch):
     assert payload["status"] == "completed"
     assert payload["answer"] == "恢复执行完成"
     assert appended_messages[0] == (11, "assistant", "恢复执行完成")
+
+
+def test_resume_skill_agent_turn_rejects_pending_action():
+    appended_messages = []
+
+    class DummyDb:
+        def __init__(self) -> None:
+            self.conversation = {"conversation_id": 13, "title": "", "folder_id": None}
+
+        def get_chat_conversation(self, conversation_id):
+            return self.conversation if int(conversation_id) == 13 else None
+
+        def append_chat_message(self, conversation_id, role, content, sources=None, answer_mode=None, route_mode=None):
+            appended_messages.append((conversation_id, role, content))
+            return {"conversation_id": conversation_id, "role": role, "content": content}
+
+        def list_recent_chat_messages_by_turns(self, conversation_id, *, keep_turns):
+            return []
+
+    runtime = SimpleNamespace(
+        db=DummyDb(),
+        skill_service=SimpleNamespace(
+            build_available_skills_prompt=lambda **_: "<available_skills />",
+            get_active_skills=lambda session_id: [],
+        ),
+        tool_service=SimpleNamespace(
+            list_tools=lambda: [],
+            create_workspace=lambda **kwargs: {"workspace_id": "skill-agent-13"},
+        ),
+        qwen=SimpleNamespace(model=object()),
+        settings=SimpleNamespace(chat_recent_turns_to_keep=5),
+    )
+
+    payload = asyncio.run(
+        module.resume_skill_agent_turn(
+            runtime,
+            session_id="conversation-13",
+            decision={"type": "reject", "message": "用户拒绝了 skill 加载。"},
+            conversation_id=13,
+        )
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["answer"] == "用户拒绝了 skill 加载。"
+    assert appended_messages[0] == (13, "assistant", "用户拒绝了 skill 加载。")
 
 
 def test_format_interrupt_keeps_file_action_payload():

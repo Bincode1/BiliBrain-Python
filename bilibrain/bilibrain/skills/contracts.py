@@ -8,6 +8,10 @@ from pydantic import BaseModel, Field
 class SkillDescriptor(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     description: str = Field(..., min_length=1)
+    short_description: str = ""
+    when_to_use: str = ""
+    input_hint: str = ""
+    examples: list[str] = Field(default_factory=list)
     skill_path: str = Field(..., min_length=1)
     directory_path: str = Field(..., min_length=1)
     allow_model_invocation: bool = True
@@ -44,6 +48,10 @@ class ParsedSkillManifest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     description: str = Field(..., min_length=1)
     body: str = Field(..., min_length=1)
+    short_description: str = ""
+    when_to_use: str = ""
+    input_hint: str = ""
+    examples: list[str] = Field(default_factory=list)
     allow_model_invocation: bool = True
     allowed_tools: list[str] = Field(default_factory=list)
     requires: list[str] = Field(default_factory=list)

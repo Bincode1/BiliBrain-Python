@@ -18,6 +18,15 @@ _HITL_TOOLS = {"run_command", "write_file", "append_file", "make_dir"}
 _MAX_ROUNDS = 20
 
 
+def _build_skills_state(runtime: Runtime, session_id: str) -> dict[str, Any]:
+    if runtime.skill_service is None:
+        return {"active_skills": [], "loaded_skills": []}
+    return {
+        "active_skills": runtime.skill_service.get_active_skills(session_id),
+        "loaded_skills": runtime.skill_service.get_loaded_skills(session_id),
+    }
+
+
 def build_skill_agent_session_id(
     *, conversation_id: int | None = None, explicit_session_id: str | None = None
 ) -> str:
@@ -36,16 +45,12 @@ def build_skill_agent_prompt(
     *,
     session_id: str,
     workspace_id: str,
+    actor: str,
 ) -> str:
     available_skills = (
-        runtime.skill_service.build_available_skills_prompt(session_id=session_id)
+        runtime.skill_service.build_available_skills_prompt(session_id=session_id, actor=actor)
         if runtime.skill_service
         else "<available_skills />"
-    )
-    active_skills = (
-        runtime.skill_service.build_active_skills_prompt(session_id=session_id)
-        if runtime.skill_service
-        else "<active_skills />"
     )
     tools = runtime.tool_service.list_tools() if runtime.tool_service else []
     tool_lines = []
@@ -60,22 +65,23 @@ def build_skill_agent_prompt(
             "你是 BiliBrain 的 Skill Agent。",
             "你的职责是结合会话上下文、可用 skills 和 workspace tools 来完成任务。",
             "原则：",
-            "1. 如果任务明显属于某个技能场景，先调用 activate_skill，再依据技能说明做事。",
-            "2. 不要假装某个 skill 已激活；如果要使用技能方法论，必须先显式 activate_skill。",
-            "3. 能用已有 active skills 解决时，不要重复激活相同 skill。",
-            "4. 对文件和命令操作保持克制，只在当前 workspace 内工作。",
-            "5. 如果工具由于审批策略失败，要明确告诉用户需要预批准，而不是伪造执行结果。",
+            "1. prompt 里只提供已激活 skills 的摘要，不提供正文。",
+            "2. <access> 为 allow 的 skill 可以直接调用 skill(name)；<access> 为 ask 的 skill 需要先走审批。",
+            "3. 只有当任务明显匹配某个 skill 时，才调用 skill(name) 读取完整 SKILL.md。",
+            "4. skill(name) 返回正文后，再依据其中的说明继续处理。",
+            "5. skill(name) 会返回 BILIBRAIN_SKILL_DIR、resource_map 和 usage_rules；相对路径默认相对 BILIBRAIN_SKILL_DIR 解析。",
+            "6. 如果 skill 正文提到 references、scripts、assets 或其他文件，不要假设内容已加载，继续用普通工具按需读取或执行。",
+            "7. 对文件和命令操作保持克制，只在当前 workspace 内工作。",
+            "8. 如果工具或 skill 因审批策略失败，要明确告诉用户需要预批准，而不是伪造执行结果。",
+            "9. 不要调用不存在的 activate_skill；skills 由用户预先激活，你运行时只负责读取。",
             "",
             f"当前 workspace_id: {workspace_id}",
             "",
             "当前可用工具：",
             tool_block,
             "",
-            "当前可用 skills：",
+            "当前可用 skills 摘要：",
             available_skills,
-            "",
-            "当前已激活 skills：",
-            active_skills,
         ]
     )
 
@@ -192,6 +198,53 @@ def _build_approval_request(
     }
 
 
+def _build_skill_approval_request(
+    runtime: Runtime,
+    *,
+    skill_name: str,
+    call_id: str,
+    session_id: str,
+    actor: str,
+) -> dict[str, Any]:
+    skill_service = runtime.skill_service
+    if skill_service is None:
+        raise RuntimeError("Skill service is not available.")
+    decision = skill_service.evaluate_skill_access(
+        name=skill_name,
+        session_id=session_id,
+        actor=actor,
+    )
+    skill_detail = skill_service.get_skill(name=skill_name)
+    return {
+        "interrupt_id": call_id,
+        "action_requests": [
+            {
+                "name": "skill",
+                "args": {"name": skill_name},
+                "id": call_id,
+                "description": f"技能 '{skill_name}' 需要审批后才能加载完整 SKILL.md。",
+                "summary": {
+                    "skill_name": skill_name,
+                    "description": skill_detail.get("description") or "",
+                    "resource_count": len(skill_detail.get("resources") or []),
+                    "allowed_tools": skill_detail.get("allowed_tools") or [],
+                    "access": decision.action.value,
+                },
+                "policy_allowed": True,
+                "policy_requires_approval": bool(decision.requires_approval),
+                "policy_reason": decision.reason,
+                "policy_blocked": False,
+            }
+        ],
+        "review_configs": [
+            {
+                "action_name": "skill",
+                "allowed_decisions": ["approve", "edit", "reject"],
+            }
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Core agent loop (non-streaming)
 # ---------------------------------------------------------------------------
@@ -201,6 +254,8 @@ async def _run_skill_agent_loop(
     *,
     messages: list[Any],
     tools: list[Any],
+    session_id: str,
+    actor: str,
     event_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     llm = runtime.qwen.model.bind_tools(tools)
@@ -234,6 +289,33 @@ async def _run_skill_agent_loop(
             if tc_name in _HITL_TOOLS:
                 approval_request = _build_approval_request(runtime, tc_name, tc_args, tc_id)
                 return "", approval_request
+
+            if tc_name == "skill":
+                skill_name = str((tc_args or {}).get("name") or "").strip()
+                decision = runtime.skill_service.evaluate_skill_access(
+                    name=skill_name,
+                    session_id=session_id,
+                    actor=actor,
+                ) if runtime.skill_service is not None else None
+                if decision is not None and decision.requires_approval:
+                    if event_callback is not None:
+                        event_callback(
+                            "skill",
+                            {
+                                "phase": "approval_required",
+                                "name": skill_name,
+                                "session_id": session_id,
+                                "error": decision.reason,
+                            },
+                        )
+                    approval_request = _build_skill_approval_request(
+                        runtime,
+                        skill_name=skill_name,
+                        call_id=tc_id,
+                        session_id=session_id,
+                        actor=actor,
+                    )
+                    return "", approval_request
 
             if event_callback is not None:
                 event_callback("tool", {"phase": "start", "name": tc_name, "summary": {}})
@@ -330,6 +412,7 @@ async def _execute_skill_agent_turn(
         runtime,
         session_id=resolved_session_id,
         workspace_id=workspace["workspace_id"],
+        actor=actor,
     )
 
     # Build messages
@@ -342,7 +425,12 @@ async def _execute_skill_agent_turn(
     messages.append(HumanMessage(content=query))
 
     answer_text, approval_request = await _run_skill_agent_loop(
-        runtime, messages=messages, tools=all_tools, event_callback=event_callback,
+        runtime,
+        messages=messages,
+        tools=all_tools,
+        session_id=resolved_session_id,
+        actor=actor,
+        event_callback=event_callback,
     )
 
     if approval_request is not None:
@@ -354,7 +442,7 @@ async def _execute_skill_agent_turn(
             "session_id": resolved_session_id,
             "workspace_id": workspace["workspace_id"],
             "approval_request": approval_request,
-            "active_skills": runtime.skill_service.get_active_skills(resolved_session_id),
+            **_build_skills_state(runtime, resolved_session_id),
         }
 
     if not answer_text:
@@ -375,7 +463,7 @@ async def _execute_skill_agent_turn(
         "workspace_id": workspace["workspace_id"],
         "answer": answer_text,
         "assistant_message": assistant_message,
-        "active_skills": runtime.skill_service.get_active_skills(resolved_session_id),
+        **_build_skills_state(runtime, resolved_session_id),
     }
 
 
@@ -403,11 +491,7 @@ async def stream_answer_with_skill_agent_events(
     if getattr(runtime, "skill_service", None) is not None:
         yield make_sse_event(
             "skills",
-            {
-                "active_skills": runtime.skill_service.get_active_skills(
-                    resolved_session_id
-                )
-            },
+            _build_skills_state(runtime, resolved_session_id),
         )
     queue: asyncio.Queue[tuple[str, dict[str, Any] | None] | None] = asyncio.Queue()
 
@@ -447,9 +531,10 @@ async def stream_answer_with_skill_agent_events(
                     "approval_request": result.get("approval_request") or {},
                 },
             )
-            yield make_sse_event(
-                "skills", {"active_skills": result.get("active_skills") or []}
-            )
+            yield make_sse_event("skills", {
+                "active_skills": result.get("active_skills") or [],
+                "loaded_skills": result.get("loaded_skills") or [],
+            })
             yield make_sse_event("done", {})
             return
         yield make_sse_event(
@@ -459,9 +544,10 @@ async def stream_answer_with_skill_agent_events(
         if answer_text:
             for chunk in _chunk_text(answer_text, chunk_size=48):
                 yield make_sse_event("answer", {"delta": chunk})
-        yield make_sse_event(
-            "skills", {"active_skills": result.get("active_skills") or []}
-        )
+        yield make_sse_event("skills", {
+            "active_skills": result.get("active_skills") or [],
+            "loaded_skills": result.get("loaded_skills") or [],
+        })
         yield make_sse_event("done", {})
     except Exception as exc:
         yield make_sse_event("error", {"detail": str(exc) or "Skill Agent 执行失败"})
@@ -507,7 +593,7 @@ async def resume_skill_agent_turn(
     workspace_id = workspace["workspace_id"]
 
     prompt = build_skill_agent_prompt(
-        runtime, session_id=session_id, workspace_id=workspace_id,
+        runtime, session_id=session_id, workspace_id=workspace_id, actor=actor,
     )
     skill_tools = build_skill_langchain_tools(
         runtime.skill_service, session_id=session_id, actor=actor,
@@ -535,11 +621,38 @@ async def resume_skill_agent_turn(
         content="",
         tool_calls=[{"name": approved_name, "args": approved_args, "id": approved_id}],
     ))
+    decision_type = str(decision.get("type") or "").strip().lower()
+    if decision_type == "reject":
+        answer_text = str(decision.get("message") or "用户拒绝了当前操作。").strip()
+        assistant_message = await runtime.db.append_chat_message(
+            resolved_conversation_id,
+            role="assistant",
+            content=answer_text,
+        )
+        return {
+            "status": "completed",
+            "conversation_id": resolved_conversation_id,
+            "session_id": session_id,
+            "workspace_id": workspace_id,
+            "answer": answer_text,
+            "assistant_message": assistant_message,
+            **_build_skills_state(runtime, session_id),
+        }
+    if approved_name == "skill" and runtime.skill_service is not None:
+        runtime.skill_service.approve_skill(
+            name=str(approved_args.get("name") or ""),
+            session_id=session_id,
+        )
+
     result_str = await execute(approved_name, approved_args)
     messages.append(ToolMessage(content=result_str, tool_call_id=approved_id))
 
     answer_text, next_approval = await _run_skill_agent_loop(
-        runtime, messages=messages, tools=all_tools,
+        runtime,
+        messages=messages,
+        tools=all_tools,
+        session_id=session_id,
+        actor=actor,
     )
 
     if next_approval is not None:
@@ -549,7 +662,7 @@ async def resume_skill_agent_turn(
             "session_id": session_id,
             "workspace_id": workspace_id,
             "approval_request": next_approval,
-            "active_skills": runtime.skill_service.get_active_skills(session_id),
+            **_build_skills_state(runtime, session_id),
         }
 
     if not answer_text:
@@ -566,7 +679,7 @@ async def resume_skill_agent_turn(
         "workspace_id": workspace_id,
         "answer": answer_text,
         "assistant_message": assistant_message,
-        "active_skills": runtime.skill_service.get_active_skills(session_id),
+        **_build_skills_state(runtime, session_id),
     }
 
 
@@ -587,7 +700,7 @@ async def stream_resume_skill_agent_turn_events(
     if runtime.skill_service is not None:
         yield make_sse_event(
             "skills",
-            {"active_skills": runtime.skill_service.get_active_skills(session_id)},
+            _build_skills_state(runtime, session_id),
         )
 
     queue: asyncio.Queue[tuple[str, dict[str, Any] | None] | None] = asyncio.Queue()
@@ -604,7 +717,7 @@ async def stream_resume_skill_agent_turn_events(
         workspace_id = workspace["workspace_id"]
 
         prompt = build_skill_agent_prompt(
-            runtime, session_id=session_id, workspace_id=workspace_id,
+            runtime, session_id=session_id, workspace_id=workspace_id, actor=actor,
         )
         skill_tools = build_skill_langchain_tools(
             runtime.skill_service, session_id=session_id, actor=actor,
@@ -634,13 +747,41 @@ async def stream_resume_skill_agent_turn_events(
             content="",
             tool_calls=[{"name": approved_name, "args": approved_args, "id": approved_id}],
         ))
+        decision_type = str(decision.get("type") or "").strip().lower()
+        if decision_type == "reject":
+            answer_text = str(decision.get("message") or "用户拒绝了当前操作。").strip()
+            await runtime.db.append_chat_message(
+                resolved_conversation_id,
+                role="assistant",
+                content=answer_text,
+            )
+            emit_event("status", {"delta": "用户拒绝了当前操作。"})
+            return {
+                "status": "completed",
+                "conversation_id": resolved_conversation_id,
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+                "answer": answer_text,
+                **_build_skills_state(runtime, session_id),
+            }
+        if approved_name == "skill" and runtime.skill_service is not None:
+            runtime.skill_service.approve_skill(
+                name=str(approved_args.get("name") or ""),
+                session_id=session_id,
+            )
+
         result_str = await execute(approved_name, approved_args)
         messages.append(ToolMessage(content=result_str, tool_call_id=approved_id))
 
         emit_event("status", {"delta": "Skill Agent 已接收审批结果，继续执行..."})
 
         answer_text, next_approval = await _run_skill_agent_loop(
-            runtime, messages=messages, tools=all_tools, event_callback=emit_event,
+            runtime,
+            messages=messages,
+            tools=all_tools,
+            session_id=session_id,
+            actor=actor,
+            event_callback=emit_event,
         )
 
         if next_approval is not None:
@@ -651,7 +792,7 @@ async def stream_resume_skill_agent_turn_events(
                 "session_id": session_id,
                 "workspace_id": workspace_id,
                 "approval_request": next_approval,
-                "active_skills": runtime.skill_service.get_active_skills(session_id),
+                **_build_skills_state(runtime, session_id),
             }
 
         if not answer_text:
@@ -668,7 +809,7 @@ async def stream_resume_skill_agent_turn_events(
             "session_id": session_id,
             "workspace_id": workspace_id,
             "answer": answer_text,
-            "active_skills": runtime.skill_service.get_active_skills(session_id),
+            **_build_skills_state(runtime, session_id),
         }
 
     try:
@@ -694,18 +835,20 @@ async def stream_resume_skill_agent_turn_events(
                     "approval_request": result.get("approval_request") or {},
                 },
             )
-            yield make_sse_event(
-                "skills", {"active_skills": result.get("active_skills") or []}
-            )
+            yield make_sse_event("skills", {
+                "active_skills": result.get("active_skills") or [],
+                "loaded_skills": result.get("loaded_skills") or [],
+            })
             yield make_sse_event("done", {})
             return
         answer_text = str(result.get("answer") or "").strip()
         if answer_text:
             for chunk in _chunk_text(answer_text, chunk_size=48):
                 yield make_sse_event("answer", {"delta": chunk})
-        yield make_sse_event(
-            "skills", {"active_skills": result.get("active_skills") or []}
-        )
+        yield make_sse_event("skills", {
+            "active_skills": result.get("active_skills") or [],
+            "loaded_skills": result.get("loaded_skills") or [],
+        })
         yield make_sse_event("done", {})
     except Exception as exc:
         yield make_sse_event(

@@ -465,7 +465,10 @@ export const useFoldersStore = defineStore("folders", () => {
     chatStore.clearChatStatus();
     video.summaryBusy = true;
     try {
-      const data = await api(`/api/videos/${encodeURIComponent(video.bvid)}/summary`, { method: "POST" });
+      const data = await api(`/api/videos/${encodeURIComponent(video.bvid)}/summary`, {
+        method: "POST",
+        timeoutMs: 180_000,
+      });
       video.has_summary = true;
       video.summary_updated_at = data.updated_at || "";
       if (openViewer) {

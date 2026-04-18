@@ -368,6 +368,7 @@ export const useChatStore = defineStore("chat", () => {
           pushAgentActivity(assistantMessage, "tool_events", data);
         } else if (event === "skills") {
           assistantMessage.active_skills = Array.isArray(data.active_skills) ? data.active_skills : [];
+          assistantMessage.loaded_skills = Array.isArray(data.loaded_skills) ? data.loaded_skills : [];
         } else if (event === "approval") {
           skillAgentPendingApproval.value = {
             conversationId: activeConversationId.value || null,
@@ -415,6 +416,7 @@ export const useChatStore = defineStore("chat", () => {
           tool_events: [],
           skill_events: [],
           active_skills: [],
+          loaded_skills: [],
         },
         activeConversationId.value
       )
@@ -466,7 +468,7 @@ export const useChatStore = defineStore("chat", () => {
     }
 
     const assistantMessage = reactive(
-      normalizeChatMessage({ role: "assistant", text: "", sources: [], tool_events: [], skill_events: [], active_skills: [] }, activeConversationId.value)
+      normalizeChatMessage({ role: "assistant", text: "", sources: [], tool_events: [], skill_events: [], active_skills: [], loaded_skills: [] }, activeConversationId.value)
     );
     assistantMessage._streaming = true;
     chatMessages.value.push(assistantMessage);

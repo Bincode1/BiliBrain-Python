@@ -89,6 +89,7 @@ const hasAgentContent = computed(() =>
   !!(
     props.message.agent_events?.length ||
     props.message.active_skills?.length ||
+    props.message.loaded_skills?.length ||
     props.message.skill_events?.length ||
     props.message.tool_events?.length
   )

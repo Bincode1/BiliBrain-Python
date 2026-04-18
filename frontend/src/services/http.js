@@ -2,10 +2,10 @@ const DEFAULT_TIMEOUT = 30_000;
 const API_BASE_URL = "http://localhost:8000";
 
 export async function api(path, options = {}) {
-  const { signal: callerSignal, ...rest } = options;
+  const { signal: callerSignal, timeoutMs = DEFAULT_TIMEOUT, ...rest } = options;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   // 合并 caller signal 和 timeout signal
   let signal = controller.signal;
@@ -18,11 +18,20 @@ export async function api(path, options = {}) {
   }
 
   const url = `${API_BASE_URL}${path}`;
-  const response = await fetch(url, {
-    ...rest,
-    signal,
-    headers: { "Content-Type": "application/json", ...rest.headers },
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      ...rest,
+      signal,
+      headers: { "Content-Type": "application/json", ...rest.headers },
+    });
+  } catch (error) {
+    clearTimeout(timeout);
+    if (controller.signal.aborted) {
+      throw new Error(`请求超时（${Math.round(timeoutMs / 1000)} 秒），可稍后刷新查看结果。`);
+    }
+    throw error;
+  }
   clearTimeout(timeout);
 
   const contentType = response.headers.get("content-type") || "";

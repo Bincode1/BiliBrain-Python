@@ -81,6 +81,12 @@ async def get_chat_history(
         # started_at to the nearest preceding assistant message.
         _attach_tool_events_to_messages(messages, tool_calls)
 
+    if runtime.skill_service is not None:
+        session_id = f"conversation-{resolved_id}"
+        loaded_skills = runtime.skill_service.get_loaded_skills(session_id)
+        if loaded_skills:
+            _attach_loaded_skills_to_messages(messages, loaded_skills)
+
     return {
         "conversation_id": resolved_id,
         "folder_id": conversation.get("folder_id"),
@@ -171,6 +177,21 @@ def _summarize_tool_call(tc: dict[str, Any]) -> dict[str, Any]:
     summary["phase"] = "finish" if tc.get("status") in ("finished", "failed") else "start"
 
     return summary
+
+
+def _attach_loaded_skills_to_messages(
+    messages: list[dict[str, Any]],
+    loaded_skills: list[dict[str, Any]],
+) -> None:
+    if not messages or not loaded_skills:
+        return
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") != "assistant":
+            continue
+        if "loaded_skills" not in messages[index] or not isinstance(messages[index].get("loaded_skills"), list):
+            messages[index]["loaded_skills"] = []
+        messages[index]["loaded_skills"].extend(loaded_skills)
+        return
 
 
 async def list_chat_conversations(runtime: Runtime) -> dict[str, Any]:

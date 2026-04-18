@@ -94,6 +94,7 @@ export function normalizeChatMessage(message, fallbackConversationId = null) {
     tool_events: Array.isArray(message.tool_events) ? message.tool_events : [],
     skill_events: Array.isArray(message.skill_events) ? message.skill_events : [],
     active_skills: Array.isArray(message.active_skills) ? message.active_skills : [],
+    loaded_skills: Array.isArray(message.loaded_skills) ? message.loaded_skills : [],
     reasoning_text: message.reasoning_text || "",
   };
 }

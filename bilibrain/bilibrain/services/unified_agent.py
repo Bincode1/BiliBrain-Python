@@ -46,6 +46,15 @@ _HITL_TOOLS = {"run_command", "write_file", "append_file", "make_dir"}
 _MAX_ROUNDS = 20
 
 
+def _build_skills_state(runtime: Runtime, session_id: str) -> dict[str, Any]:
+    if runtime.skill_service is None:
+        return {"active_skills": [], "loaded_skills": []}
+    return {
+        "active_skills": runtime.skill_service.get_active_skills(session_id),
+        "loaded_skills": runtime.skill_service.get_loaded_skills(session_id),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Session helpers
 # ---------------------------------------------------------------------------
@@ -72,17 +81,13 @@ def build_unified_agent_prompt(
     workspace_id: str,
     scope_description: str,
     memory_text: str,
+    actor: str,
 ) -> str:
     # --- Skills ---
     available_skills = (
-        runtime.skill_service.build_available_skills_prompt(session_id=session_id)
+        runtime.skill_service.build_available_skills_prompt(session_id=session_id, actor=actor)
         if runtime.skill_service
         else "<available_skills />"
-    )
-    active_skills = (
-        runtime.skill_service.build_active_skills_prompt(session_id=session_id)
-        if runtime.skill_service
-        else "<active_skills />"
     )
 
     # --- Workspace tools ---
@@ -101,29 +106,73 @@ def build_unified_agent_prompt(
 
     return "\n".join(
         [
-            "你是 BiliBrain，一个 Bilibili 视频知识助手。",
+            "你是 BiliBrain 的统一 Agent，一个面向 B 站视频与收藏夹知识库的中文助手。",
+            "你的首要目标是基于当前知识范围，为用户提供准确、克制、可执行的回答。",
             "",
-            "## 核心规则",
-            "1. 只使用检索到的资料回答知识问题，不要补充外部知识",
-            "2. 关键结论附上资料编号，格式【n】",
-            "3. 只能使用资料里已有的编号",
-            "4. 如果资料不足，直接说明",
+            "## 答题决策流程",
+            "每次收到用户请求，严格按以下顺序决策，不得跳步：",
             "",
-            "## 工具使用策略",
-            "- search_knowledge_base：查具体细节、事实、步骤、定义、时间点",
-            "- search_video_summaries：做总结、概括、归纳、对比、梳理整体观点",
-            "- read_file / write_file / list_dir / ...：文件操作（限 workspace 内）",
-            "- run_command：执行命令",
-            "- web_search / browser_read_page：网络搜索和网页读取",
+            "### 第一步：匹配 Skill",
+            "检查下方 <available_skills> 列表，根据每个 skill 的名称、描述、适用场景判断是否与用户意图匹配。",
+            "- 若匹配：立即调用 skill(name) 读取完整 SKILL.md。",
+            "- 读取后优先严格遵循该 skill 定义的流程、输出结构和资源使用方式。",
+            "- 如果 skill 正文要求读取 references、scripts、assets 或其他文件，再继续调用普通工具按需处理。",
+            "- skill 负责组织流程，不能替代事实来源。",
+            "- 如果没有匹配的 skill，进入第二步。",
             "",
-            "## 技能使用",
-            "- <active_skills> 包含用户已激活的技能指令，根据问题自动判断是否需要遵循",
-            "- 如果问题匹配某个已激活技能的场景，按其指引执行",
-            "- 如果没有匹配的激活技能，用通用能力回答",
+            "### 第二步：直接选工具",
+            "如果没有匹配 skill，或 skill 明确要求调用工具，就根据下方工具规则选择合适工具，再基于真实返回内容回答。",
             "",
-            "## 文件与命令",
-            "- 对文件和命令操作保持克制，只在当前 workspace 内工作",
-            "- 如果工具由于审批策略失败，要明确告诉用户需要预批准，而不是伪造执行结果",
+            "### 第三步：结果不足时",
+            "- 若工具返回为空，或工具结果不能直接覆盖问题，明确告知用户“当前工具结果不足以支持这个结论”。",
+            "- 不得用记忆、常识或推断补充知识库中没有的事实。",
+            "",
+            "## Skill 与工具的关系",
+            "- Skill 负责组织流程、步骤顺序和输出结构。",
+            "- 工具提供事实来源和执行结果。",
+            "- 无论是否使用 skill，最终答案都必须有工具返回的真实内容作为支撑。",
+            "",
+            "## 工具使用规则",
+            "### search_knowledge_base",
+            "- 涉及具体视频内容、事实、步骤、定义、时间点等精确问题时调用。",
+            "- 返回结果出来后再下结论，不得先写结论再补检索。",
+            "",
+            "### search_video_summaries",
+            "- 涉及跨视频归纳、收藏夹整体概览、宏观总结、主题对比时调用。",
+            "- 仅能基于工具真实返回做归纳，不得自行补充未返回的视频结论。",
+            "",
+            "### read_file / list_dir",
+            "- 当 skill 正文要求读取 skill 附件、参考资料、脚本或当前 workspace 文件时调用。",
+            "- 相对路径默认相对 skill(name) 返回的 BILIBRAIN_SKILL_DIR 或当前 workspace 解析。",
+            "",
+            "### write_file / append_file / make_dir",
+            "- 仅在用户明确要求写文件、保存结果或创建目录时调用。",
+            "- 用户没有明确要求落盘时，不要主动写文件。",
+            "",
+            "### run_command",
+            "- 仅在确实需要执行本地命令或脚本时调用。",
+            "- 拿到真实 stdout / stderr / error 后再继续，不得假设命令已成功。",
+            "- 若命令失败，只有在返回内容明确给出依据时才能解释失败原因；否则只能如实说明当前结果没有提供具体原因。",
+            "",
+            "### web_search / browser_read_page",
+            "- 仅在当前知识库工具不能覆盖、且任务确实需要外部网页信息时调用。",
+            "- 拿到真实网页结果后再引用，不得把常识当网页结果。",
+            "",
+            "### skill(name)",
+            "- 仅当 <available_skills> 中某个 skill 与当前任务明显匹配时调用。",
+            "- <access> 为 allow 的 skill 可以直接调用；<access> 为 ask 的 skill 需要先审批。",
+            "- skill(name) 会返回 BILIBRAIN_SKILL_DIR、resource_map、usage_rules；不得自动递归加载附件目录。",
+            "",
+            "## 引用规则",
+            "- 使用 search_knowledge_base 或 search_video_summaries 的返回内容时，在正文中用 [N] 标注引用，N 对应 ref_index。",
+            "- 只有明确由来源支撑的句子才加引用；过渡语和总结句不加。",
+            "- 禁止使用“资料1”“来源1”“【1】”等其他格式。",
+            "",
+            "## 输出风格",
+            "- 先结论，后依据。",
+            "- 简洁，不冗长。",
+            "- 全程中文。",
+            "- 如果资料不足，直接说明，不要硬答。",
             "",
             f"## 当前范围\n{scope_description}",
             "",
@@ -132,11 +181,8 @@ def build_unified_agent_prompt(
             "## 当前可用工具",
             tool_block,
             "",
-            "## 当前技能目录",
+            "## 当前可用 skills 摘要",
             available_skills,
-            "",
-            "## 当前已激活 skills",
-            active_skills,
             memory_block,
         ]
     )
@@ -215,6 +261,53 @@ def _build_approval_request(
     }
 
 
+def _build_skill_approval_request(
+    runtime: Runtime,
+    *,
+    skill_name: str,
+    call_id: str,
+    session_id: str,
+    actor: str,
+) -> dict[str, Any]:
+    skill_service = runtime.skill_service
+    if skill_service is None:
+        raise RuntimeError("Skill service is not available.")
+    decision = skill_service.evaluate_skill_access(
+        name=skill_name,
+        session_id=session_id,
+        actor=actor,
+    )
+    skill_detail = skill_service.get_skill(name=skill_name)
+    return {
+        "interrupt_id": call_id,
+        "action_requests": [
+            {
+                "name": "skill",
+                "args": {"name": skill_name},
+                "id": call_id,
+                "description": f"技能 '{skill_name}' 需要审批后才能加载完整 SKILL.md。",
+                "summary": {
+                    "skill_name": skill_name,
+                    "description": skill_detail.get("description") or "",
+                    "resource_count": len(skill_detail.get("resources") or []),
+                    "allowed_tools": skill_detail.get("allowed_tools") or [],
+                    "access": decision.action.value,
+                },
+                "policy_allowed": True,
+                "policy_requires_approval": bool(decision.requires_approval),
+                "policy_reason": decision.reason,
+                "policy_blocked": False,
+            }
+        ],
+        "review_configs": [
+            {
+                "action_name": "skill",
+                "allowed_decisions": ["approve", "edit", "reject"],
+            }
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Core agent loop: bind_tools + while loop
 # ---------------------------------------------------------------------------
@@ -224,6 +317,8 @@ async def _run_agent_loop(
     *,
     messages: list[Any],
     tools: list[Any],
+    session_id: str,
+    actor: str,
     event_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """Run the ReAct loop. Returns (answer_text, approval_request_or_None).
@@ -274,6 +369,30 @@ async def _run_agent_loop(
                 # Return immediately — caller must handle approval
                 return "", approval_request
 
+            if tc_name == "skill":
+                skill_name = str((tc_args or {}).get("name") or "").strip()
+                decision = runtime.skill_service.evaluate_skill_access(
+                    name=skill_name,
+                    session_id=session_id,
+                    actor=actor,
+                ) if runtime.skill_service is not None else None
+                if decision is not None and decision.requires_approval:
+                    if event_callback is not None:
+                        event_callback("skill", {
+                            "phase": "approval_required",
+                            "name": skill_name,
+                            "session_id": session_id,
+                            "error": decision.reason,
+                        })
+                    approval_request = _build_skill_approval_request(
+                        runtime,
+                        skill_name=skill_name,
+                        call_id=tc_id,
+                        session_id=session_id,
+                        actor=actor,
+                    )
+                    return "", approval_request
+
             # ── Execute tool ────────────────────────────────────────────
             result_str = await execute(tc_name, tc_args)
 
@@ -287,6 +406,8 @@ async def _stream_agent_loop(
     *,
     messages: list[Any],
     tools: list[Any],
+    session_id: str,
+    actor: str,
     emit_event: Callable[[str, dict[str, Any] | None], None],
 ) -> tuple[str, dict[str, Any] | None]:
     """Streaming version of the ReAct loop.
@@ -397,6 +518,29 @@ async def _stream_agent_loop(
                     runtime, tc_name, tc_args, tc_id,
                 )
                 return full_text.strip(), approval_request
+
+            if tc_name == "skill":
+                skill_name = str((tc_args or {}).get("name") or "").strip()
+                decision = runtime.skill_service.evaluate_skill_access(
+                    name=skill_name,
+                    session_id=session_id,
+                    actor=actor,
+                ) if runtime.skill_service is not None else None
+                if decision is not None and decision.requires_approval:
+                    emit_event("skill", {
+                        "phase": "approval_required",
+                        "name": skill_name,
+                        "session_id": session_id,
+                        "error": decision.reason,
+                    })
+                    approval_request = _build_skill_approval_request(
+                        runtime,
+                        skill_name=skill_name,
+                        call_id=tc_id,
+                        session_id=session_id,
+                        actor=actor,
+                    )
+                    return full_text.strip(), approval_request
 
             # ── Execute tool ────────────────────────────────────────────
             result_str = await execute(tc_name, tc_args)
@@ -620,6 +764,7 @@ async def _build_turn_context(
         workspace_id=workspace_id,
         scope_description=ctx["scope_description"],
         memory_text=ctx["memory_text"],
+        actor=actor,
     )
 
     # Build messages
@@ -721,6 +866,8 @@ async def _execute_unified_agent_turn(
         runtime,
         messages=messages,
         tools=all_tools,
+        session_id=resolved_session_id,
+        actor=actor,
         event_callback=event_callback,
     )
 
@@ -737,11 +884,7 @@ async def _execute_unified_agent_turn(
             "_pending_messages": messages,  # carry state for resume
             "_pending_tools": all_tools,
             "_pending_sources": collected_sources,
-            "active_skills": (
-                runtime.skill_service.get_active_skills(resolved_session_id)
-                if runtime.skill_service
-                else []
-            ),
+            **_build_skills_state(runtime, resolved_session_id),
         }
 
     # --- Postprocess ---
@@ -768,11 +911,7 @@ async def _execute_unified_agent_turn(
         "answer_mode": post["answer_mode"],
         "assistant_message": post["assistant_message"],
         "sources": collected_sources,
-        "active_skills": (
-            runtime.skill_service.get_active_skills(resolved_session_id)
-            if runtime.skill_service
-            else []
-        ),
+        **_build_skills_state(runtime, resolved_session_id),
     }
 
 
@@ -807,7 +946,7 @@ async def stream_unified_agent_events(
     if getattr(runtime, "skill_service", None) is not None:
         yield make_sse_event(
             "skills",
-            {"active_skills": runtime.skill_service.get_active_skills(resolved_session_id)},
+            _build_skills_state(runtime, resolved_session_id),
         )
 
     # ── Pre-processing ────────────────────────────────────────────────────
@@ -864,6 +1003,8 @@ async def stream_unified_agent_events(
                     runtime,
                     messages=messages,
                     tools=all_tools,
+                    session_id=resolved_session_id,
+                    actor=actor,
                     emit_event=emit_event,
                 )
             except Exception as exc:
@@ -905,12 +1046,7 @@ async def stream_unified_agent_events(
                 "workspace_id": workspace_id,
                 "approval_request": approval_request,
             })
-            yield make_sse_event("skills", {
-                "active_skills": (
-                    runtime.skill_service.get_active_skills(resolved_session_id)
-                    if runtime.skill_service else []
-                ),
-            })
+            yield make_sse_event("skills", _build_skills_state(runtime, resolved_session_id))
             yield make_sse_event("done", {})
             return
 
@@ -941,12 +1077,7 @@ async def stream_unified_agent_events(
         else:
             yield make_sse_event("route", {"route_mode": "direct"})
 
-        yield make_sse_event("skills", {
-            "active_skills": (
-                runtime.skill_service.get_active_skills(resolved_session_id)
-                if runtime.skill_service else []
-            ),
-        })
+        yield make_sse_event("skills", _build_skills_state(runtime, resolved_session_id))
         yield make_sse_event("done", {})
 
     except Exception as exc:
@@ -1034,7 +1165,7 @@ async def resume_unified_agent_turn(
 
     prompt = build_unified_agent_prompt(
         runtime, session_id=session_id, workspace_id=workspace_id,
-        scope_description=scope_description, memory_text="",
+        scope_description=scope_description, memory_text="", actor=actor,
     )
     history = await build_skill_agent_history(runtime, resolved_conversation_id)
     messages = [SystemMessage(content=prompt)]
@@ -1056,13 +1187,37 @@ async def resume_unified_agent_turn(
         tool_calls=[{"name": approved_name, "args": approved_args, "id": approved_id}],
     ))
 
+    decision_type = str(decision.get("type") or "").strip().lower()
+    if decision_type == "reject":
+        answer_text = str(decision.get("message") or "用户拒绝了当前操作。").strip()
+        await runtime.db.append_chat_message(
+            resolved_conversation_id, role="assistant", content=answer_text,
+        )
+        return {
+            "status": "completed",
+            "conversation_id": resolved_conversation_id,
+            "session_id": session_id,
+            "workspace_id": workspace_id,
+            "answer": answer_text,
+            **_build_skills_state(runtime, session_id),
+        }
+    if approved_name == "skill" and runtime.skill_service is not None:
+        runtime.skill_service.approve_skill(
+            name=str(approved_args.get("name") or ""),
+            session_id=session_id,
+        )
+
     # Execute the approved tool
     result_str = await execute(approved_name, approved_args)
     messages.append(ToolMessage(content=result_str, tool_call_id=approved_id))
 
     # Continue the loop from here
     answer_text, next_approval = await _run_agent_loop(
-        runtime, messages=messages, tools=all_tools,
+        runtime,
+        messages=messages,
+        tools=all_tools,
+        session_id=session_id,
+        actor=actor,
     )
 
     if next_approval is not None:
@@ -1072,10 +1227,7 @@ async def resume_unified_agent_turn(
             "session_id": session_id,
             "workspace_id": workspace_id,
             "approval_request": next_approval,
-            "active_skills": (
-                runtime.skill_service.get_active_skills(session_id)
-                if runtime.skill_service else []
-            ),
+            **_build_skills_state(runtime, session_id),
         }
 
     if not answer_text:
@@ -1092,10 +1244,7 @@ async def resume_unified_agent_turn(
         "session_id": session_id,
         "workspace_id": workspace_id,
         "answer": answer_text,
-        "active_skills": (
-            runtime.skill_service.get_active_skills(session_id)
-            if runtime.skill_service else []
-        ),
+        **_build_skills_state(runtime, session_id),
     }
 
 
@@ -1119,7 +1268,7 @@ async def stream_resume_unified_agent_events(
     if runtime.skill_service is not None:
         yield make_sse_event(
             "skills",
-            {"active_skills": runtime.skill_service.get_active_skills(session_id)},
+            _build_skills_state(runtime, session_id),
         )
 
     queue: asyncio.Queue[tuple[str, dict[str, Any] | None] | None] = asyncio.Queue()
@@ -1164,7 +1313,7 @@ async def stream_resume_unified_agent_events(
 
     prompt = build_unified_agent_prompt(
         runtime, session_id=session_id, workspace_id=workspace_id,
-        scope_description=scope_description, memory_text="",
+        scope_description=scope_description, memory_text="", actor=actor,
     )
     history = await build_skill_agent_history(runtime, resolved_conversation_id)
     messages = [SystemMessage(content=prompt)]
@@ -1185,6 +1334,23 @@ async def stream_resume_unified_agent_events(
         tool_calls=[{"name": approved_name, "args": approved_args, "id": approved_id}],
     ))
 
+    decision_type = str(decision.get("type") or "").strip().lower()
+    if decision_type == "reject":
+        full_answer = str(decision.get("message") or "用户拒绝了当前操作。").strip()
+        await runtime.db.append_chat_message(
+            resolved_conversation_id, role="assistant", content=full_answer,
+        )
+        emit_event("status", {"delta": "用户拒绝了当前操作。"})
+        yield make_sse_event("answer", {"delta": full_answer})
+        yield make_sse_event("skills", _build_skills_state(runtime, session_id))
+        yield make_sse_event("done", {})
+        return
+    if approved_name == "skill" and runtime.skill_service is not None:
+        runtime.skill_service.approve_skill(
+            name=str(approved_args.get("name") or ""),
+            session_id=session_id,
+        )
+
     result_str = await execute(approved_name, approved_args)
     messages.append(ToolMessage(content=result_str, tool_call_id=approved_id))
 
@@ -1196,7 +1362,12 @@ async def stream_resume_unified_agent_events(
         nonlocal full_answer, next_approval
         try:
             full_answer, next_approval = await _stream_agent_loop(
-                runtime, messages=messages, tools=all_tools, emit_event=emit_event,
+                runtime,
+                messages=messages,
+                tools=all_tools,
+                session_id=session_id,
+                actor=actor,
+                emit_event=emit_event,
             )
         except Exception as exc:
             logger.exception("Agent resume loop failed")
@@ -1236,12 +1407,7 @@ async def stream_resume_unified_agent_events(
                 "workspace_id": workspace_id,
                 "approval_request": next_approval,
             })
-            yield make_sse_event("skills", {
-                "active_skills": (
-                    runtime.skill_service.get_active_skills(session_id)
-                    if runtime.skill_service else []
-                ),
-            })
+            yield make_sse_event("skills", _build_skills_state(runtime, session_id))
             yield make_sse_event("done", {})
             return
 
@@ -1254,12 +1420,7 @@ async def stream_resume_unified_agent_events(
             resolved_conversation_id, role="assistant", content=normalized,
         )
 
-        yield make_sse_event("skills", {
-            "active_skills": (
-                runtime.skill_service.get_active_skills(session_id)
-                if runtime.skill_service else []
-            ),
-        })
+        yield make_sse_event("skills", _build_skills_state(runtime, session_id))
         yield make_sse_event("done", {})
 
     except Exception as exc:

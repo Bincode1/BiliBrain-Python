@@ -17,7 +17,28 @@
 
       <div v-if="currentAction" class="flex flex-col gap-2 rounded-lg bg-secondary p-3">
         <p class="text-sm">{{ approvalDescription }}</p>
-        <p v-if="isBlockedAction" class="text-xs text-destructive">{{ currentAction.policy_reason }}</p>
+        <p v-if="currentAction.policy_reason" class="text-xs" :class="isBlockedAction ? 'text-destructive' : 'text-muted-foreground'">{{ currentAction.policy_reason }}</p>
+
+        <template v-if="isSkillAction">
+          <div class="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+            <div>
+              <label class="text-[10px] uppercase tracking-wider">技能</label>
+              <div class="font-mono text-foreground">{{ currentSkillSummary.skill_name || currentAction.args?.name || "-" }}</div>
+            </div>
+            <div>
+              <label class="text-[10px] uppercase tracking-wider">资源数</label>
+              <div class="text-foreground">{{ currentSkillSummary.resource_count ?? 0 }}</div>
+            </div>
+          </div>
+          <div v-if="currentSkillSummary.description" class="flex flex-col gap-1">
+            <label class="text-[10px] uppercase tracking-wider text-muted-foreground">说明</label>
+            <p class="text-xs text-foreground">{{ currentSkillSummary.description }}</p>
+          </div>
+          <div v-if="skillAllowedToolsText" class="flex flex-col gap-1">
+            <label class="text-[10px] uppercase tracking-wider text-muted-foreground">允许工具</label>
+            <p class="text-xs font-mono text-foreground">{{ skillAllowedToolsText }}</p>
+          </div>
+        </template>
 
         <div v-if="currentAction.name === 'run_command'" class="flex flex-col gap-1">
           <label class="text-[10px] uppercase tracking-wider text-muted-foreground">命令</label>
@@ -74,11 +95,18 @@ const currentAction = computed(() => {
   const actions = pendingApproval.value?.approvalRequest?.action_requests;
   return Array.isArray(actions) && actions.length ? actions[0] : null;
 });
+const isSkillAction = computed(() => currentAction.value?.name === "skill");
+const currentSkillSummary = computed(() => currentAction.value?.summary || {});
 const isBlockedAction = computed(() => Boolean(currentAction.value?.policy_blocked));
 const usesFilePath = computed(() => ["write_file", "append_file", "make_dir"].includes(currentAction.value?.name || ""));
 const usesContent = computed(() => ["write_file", "append_file"].includes(currentAction.value?.name || ""));
+const skillAllowedToolsText = computed(() => {
+  const tools = currentSkillSummary.value?.allowed_tools;
+  return Array.isArray(tools) && tools.length ? tools.join(", ") : "";
+});
 const approvalDescription = computed(() => {
   if (!currentAction.value) return "这个操作需要你确认后才能继续。";
+  if (isSkillAction.value) return `技能 ${currentSkillSummary.value?.skill_name || currentAction.value?.args?.name || ""} 需要你确认后才能加载完整说明。`;
   if (isBlockedAction.value) return "这个操作被当前工具策略禁止，不能通过审批放行。";
   return currentAction.value.description || "这个操作需要你确认后才能继续。";
 });
@@ -108,7 +136,9 @@ function reject() {
     type: "reject",
     message: isBlockedAction.value
       ? `用户关闭了被策略禁止的操作：${currentAction.value?.policy_reason || "策略已阻止该操作"}。`
-      : "用户拒绝了当前操作。",
+      : isSkillAction.value
+        ? `用户拒绝加载技能 ${currentSkillSummary.value?.skill_name || currentAction.value?.args?.name || ""}。`
+        : "用户拒绝了当前操作。",
   });
 }
 function editAndContinue() {

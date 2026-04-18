@@ -53,6 +53,7 @@
             <span>工具 {{ item.allowed_tools?.length || 0 }}</span>
             <span>{{ item.allow_model_invocation ? "可直接调用" : "仅手动使用" }}</span>
           </div>
+          <p v-if="item.when_to_use" class="mt-3 text-xs text-muted-foreground">适用场景：{{ item.when_to_use }}</p>
           <Button
             size="sm"
             class="mt-4 w-full"
@@ -74,6 +75,20 @@
           <div class="space-y-2">
             <h4 class="text-sm font-semibold">描述</h4>
             <p class="text-sm text-muted-foreground">{{ selectedSkill?.description || "暂无描述" }}</p>
+          </div>
+          <div v-if="selectedSkill?.when_to_use" class="space-y-2">
+            <h4 class="text-sm font-semibold">适用场景</h4>
+            <p class="text-sm text-muted-foreground">{{ selectedSkill.when_to_use }}</p>
+          </div>
+          <div v-if="selectedSkill?.input_hint" class="space-y-2">
+            <h4 class="text-sm font-semibold">输入提示</h4>
+            <p class="text-sm text-muted-foreground">{{ selectedSkill.input_hint }}</p>
+          </div>
+          <div v-if="selectedSkill?.examples?.length" class="space-y-2">
+            <h4 class="text-sm font-semibold">示例</h4>
+            <div class="flex flex-col gap-2">
+              <p v-for="example in selectedSkill.examples" :key="example" class="rounded-md bg-muted/50 px-3 py-2 text-xs text-foreground">{{ example }}</p>
+            </div>
           </div>
           <div class="space-y-2">
             <h4 class="text-sm font-semibold">允许工具</h4>

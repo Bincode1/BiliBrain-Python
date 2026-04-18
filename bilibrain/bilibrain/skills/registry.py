@@ -29,6 +29,10 @@ class SkillRegistry:
             manifest = SkillManifest(
                 name=parsed.name,
                 description=parsed.description,
+                short_description=parsed.short_description,
+                when_to_use=parsed.when_to_use,
+                input_hint=parsed.input_hint,
+                examples=parsed.examples,
                 skill_path=str(skill_file),
                 directory_path=str(skill_file.parent),
                 allow_model_invocation=parsed.allow_model_invocation,

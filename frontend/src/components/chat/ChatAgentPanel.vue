@@ -82,6 +82,7 @@ const ICON_MAP = {
   run_command: Terminal,
   web_search: Globe,
   browser_read_page: Monitor,
+  skill: Zap,
 };
 
 const TOOL_LABEL_MAP = {
@@ -97,6 +98,7 @@ const TOOL_LABEL_MAP = {
   run_command: "执行命令",
   web_search: "网络搜索",
   browser_read_page: "浏览网页",
+  skill: "读取技能",
 };
 
 const STATUS_ICONS = {
@@ -127,7 +129,8 @@ const props = defineProps({
 const hasEvents = computed(
   () =>
     (props.message.skill_events?.length || 0) +
-      (props.message.tool_events?.length || 0) >
+      (props.message.tool_events?.length || 0) +
+      (props.message.loaded_skills?.length || 0) >
     0,
 );
 
@@ -135,16 +138,36 @@ const allSteps = computed(() => {
   const result = [];
   const skillEvents = props.message.skill_events || [];
   const toolEvents = props.message.tool_events || [];
+  const loadedSkills = props.message.loaded_skills || [];
 
   // Skill events
   for (const evt of skillEvents) {
     result.push({
       id: evt._id || `skill-${result.length}`,
-      label: `激活技能: ${evt.name || ""}`,
-      icon: ICON_MAP.activate_skill || Zap,
-      state: evt.phase === "activated" ? "completed" : "running",
+      label: `${evt.name || "skill"} · ${evt.phase || "start"}`,
+      icon: ICON_MAP.skill || Zap,
+      state:
+        evt.phase === "loaded" ? "completed"
+        : evt.phase === "blocked" || evt.phase === "error" ? "error"
+        : evt.phase === "approval_required" ? "pending"
+        : "running",
       input: evt.message ? { message: evt.message } : null,
-      output: evt.phase === "activated" ? { status: "activated" } : null,
+      output: evt.phase === "loaded" ? { status: "loaded", skill_root: evt.skill_root || "" } : null,
+      errorText: evt.error || null,
+    });
+  }
+
+  for (const item of loadedSkills) {
+    result.push({
+      id: `loaded-skill-${item.name}-${result.length}`,
+      label: `已加载技能: ${item.name || ""}`,
+      icon: ICON_MAP.skill || Zap,
+      state: "completed",
+      input: {
+        actor: item.actor || "agent",
+        skill_root: item.skill_root || "",
+      },
+      output: null,
       errorText: null,
     });
   }
