@@ -37,6 +37,22 @@ frontend/dist/
 
 # Temp
 *.log
+output/
+test-results/
+findings.md
+progress.md
+task_plan.md
+.playwright-cli/
+bilibrain/.playwright-cli/
+bilibrain/tests/
+bilibrain/**/tests/
+**/test_*.py
+**/*.spec.js
+**/*.spec.ts
+**/*.spec.tsx
+**/*.test.js
+**/*.test.ts
+**/*.test.tsx
 
 # Local project artifacts
 .agents/
