@@ -22,12 +22,18 @@ function renderCitationAnchor(index, sourceMap) {
   return `<a class="inline-citation" href="${escapeHtml(source.jump_url)}" target="_blank" rel="noreferrer" title="${escapeHtml(title)}">${escapeHtml(label)}</a>`;
 }
 
+function renderCitationMarkdown(index, sourceMap) {
+  const source = sourceMap.get(index);
+  if (!source?.jump_url) return null;
+  return `[资料 ${index}](${String(source.jump_url).trim()})`;
+}
+
 /**
  * 在原始文本上预处理引用格式，将 LLM 输出的各种引用标记统一为 [N]。
  * 这必须在 marked.parse() 之前执行，避免在 HTML 层做正则导致双重嵌套。
  * 逻辑与后端 normalize_answer_citations() 保持一致。
  */
-function normalizeRawCitations(text) {
+export function normalizeRawCitations(text) {
   if (!text) return "";
   let s = text;
   // (资料1)(资料[1])(资料[1][3]) → [1] 或 [1][3]
@@ -64,6 +70,47 @@ export function renderMarkdown(text, sources = []) {
   if (!Array.isArray(sources) || !sources.length) return html;
   const sourceMap = buildSourceMap(sources);
   return replaceCitationLinks(html, sourceMap);
+}
+
+export function renderMessageMarkdown(text, sources = []) {
+  if (!text) return "";
+  const normalized = normalizeRawCitations(String(text));
+  if (!Array.isArray(sources) || !sources.length) return normalized;
+  const sourceMap = buildSourceMap(sources);
+  return normalized.replace(/\[(\d+)\]/g, (_, idx) => {
+    const markdownLink = renderCitationMarkdown(Number(idx), sourceMap);
+    return markdownLink != null ? markdownLink : `[${idx}]`;
+  });
+}
+
+export function splitMessageCitations(text, sources = []) {
+  const normalized = normalizeRawCitations(String(text || ""));
+  const sourceMap = buildSourceMap(Array.isArray(sources) ? sources : []);
+  const parts = [];
+  const regex = /\[(\d+)\]/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = regex.exec(normalized)) !== null) {
+    const start = match.index;
+    if (start > lastIndex) {
+      parts.push({ type: "text", value: normalized.slice(lastIndex, start) });
+    }
+    const refIndex = Number(match[1]);
+    const source = sourceMap.get(refIndex);
+    if (source) {
+      parts.push({ type: "citation", refIndex, source });
+    } else {
+      parts.push({ type: "text", value: match[0] });
+    }
+    lastIndex = regex.lastIndex;
+  }
+
+  if (lastIndex < normalized.length) {
+    parts.push({ type: "text", value: normalized.slice(lastIndex) });
+  }
+
+  return parts;
 }
 
 export function replaceCitations(html, sources = []) {
