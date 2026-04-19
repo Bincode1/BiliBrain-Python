@@ -1,8 +1,9 @@
 <template>
-  <article
-    class="group w-full"
-    :class="message.role === 'user' ? 'is-user flex flex-col items-end' : 'is-assistant'"
-  >
+  <Message :from="message.role" class="w-full max-w-full">
+    <article
+      class="w-full"
+      :class="message.role === 'user' ? 'flex flex-col items-end' : ''"
+    >
     <!-- User badge -->
     <div v-if="message.role === 'user'" class="mb-1.5">
       <div class="inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-bold bg-secondary text-muted-foreground">
@@ -47,14 +48,19 @@
     />
 
     <!-- Message body -->
-    <MessageContent v-if="message.role === 'user'">
-      <div class="prose prose-sm max-w-none leading-relaxed" v-html="renderedBody" />
+    <MessageContent
+      :class="message.role === 'assistant'
+        ? 'w-full max-w-none rounded-none bg-transparent px-0 py-0 text-[14px] leading-7'
+        : 'max-w-[min(82%,720px)] text-[14px] leading-7'"
+    >
+      <MessageResponse
+        :content="message.role === 'assistant' ? renderedBody : (message.text || '')"
+        :class="message.role === 'assistant'
+          ? 'w-full max-w-none rounded-none bg-transparent px-0 py-0 text-[14px] leading-7 [&_p]:my-0'
+          : '[&_p]:my-0'"
+      />
+      <span v-if="message._streaming" class="inline-block h-4 w-2 animate-pulse rounded-sm bg-primary/65 align-middle" />
     </MessageContent>
-    <div
-      v-else
-      class="prose prose-sm max-w-none leading-relaxed p-2 text-foreground"
-      v-html="renderedBody"
-    />
 
     <!-- Sources -->
     <ChatSourcePanel
@@ -63,7 +69,8 @@
       :source-label="sourceLabel"
       @toggle="$emit('toggleSources', message)"
     />
-  </article>
+    </article>
+  </Message>
 </template>
 
 <script setup>
@@ -72,12 +79,12 @@ import {
   messageModeLabel,
   messageRouteLabel,
   messageSourceLabel,
-  renderMarkdown,
+  renderMessageMarkdown,
 } from "@/utils/chat";
 import ChatAgentPanel from "./ChatAgentPanel.vue";
 import ChatSourcePanel from "./ChatSourcePanel.vue";
 import { Reasoning, ReasoningTrigger, ReasoningContent } from "@/components/ai-elements/reasoning";
-import { MessageContent } from "@/components/ai-elements/message";
+import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
 
 const props = defineProps({
   message: { type: Object, required: true },
@@ -105,14 +112,6 @@ const answerModeClass = computed(() => {
 });
 
 const renderedBody = computed(() => {
-  const text = props.message.text || "";
-  const sources = props.message.sources || [];
-  try {
-    const html = renderMarkdown(text, sources);
-    return props.message._streaming ? html + '<span class="streaming-cursor"></span>' : html;
-  } catch {
-    const fallback = text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    return props.message._streaming ? fallback + '<span class="streaming-cursor"></span>' : fallback;
-  }
+  return renderMessageMarkdown(props.message.text || "", props.message.sources || []);
 });
 </script>

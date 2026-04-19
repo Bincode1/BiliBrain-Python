@@ -4,8 +4,8 @@
     :disabled="disabled"
     @update:model-value="emit('update:modelValue', String($event ?? ''))"
   >
-    <SelectTrigger class="h-7 gap-1 rounded-full border-none bg-secondary px-2.5 text-xs shadow-none hover:bg-secondary/80">
-      <SelectValue :placeholder="placeholder || currentLabel" />
+    <SelectTrigger :class="triggerClasses">
+      <SelectValue :placeholder="placeholder || currentLabel" class="truncate" />
     </SelectTrigger>
     <SelectContent class="min-w-[140px]" position="popper" :side-offset="4">
       <SelectItem
@@ -38,6 +38,7 @@ const props = defineProps({
   placeholder: { type: String, default: "" },
   disabled: { type: Boolean, default: false },
   title: { type: String, default: "" },
+  triggerClass: { type: String, default: "" },
 });
 
 const emit = defineEmits(["update:modelValue"]);
@@ -54,4 +55,11 @@ const currentLabel = computed(() => {
   const match = normalizedOptions.value.find((o) => o.value === normalizedValue.value);
   return match?.label || "";
 });
+const triggerClasses = computed(() =>
+  [
+    "h-8 gap-1 rounded-full border border-border/70 bg-secondary px-3 text-[13px] text-foreground shadow-none hover:bg-accent",
+    "max-w-full min-w-0 [&>span]:truncate",
+    props.triggerClass,
+  ].join(" ")
+);
 </script>

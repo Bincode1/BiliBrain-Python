@@ -4,7 +4,7 @@ import { parseSseFrames, parseSseEvent } from "@/utils/sse";
 /**
  * 统一 SSE 流式处理 composable。
  *
- * 提供单一的 SSE 解析循环，消除 RAG / Skill Agent 路径的代码重复。
+ * 提供单一的 SSE 解析循环，消除 RAG / Agent 路径的代码重复。
  * 内置 AbortController，组件卸载时自动中断连接。
  */
 export function useSseStream() {

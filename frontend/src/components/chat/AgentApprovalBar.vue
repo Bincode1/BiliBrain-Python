@@ -2,20 +2,20 @@
   <section
     v-if="pendingApproval"
     ref="approvalBarEl"
-    class="rounded-xl border border-border bg-card p-4 max-w-3xl w-full"
+    class="w-full max-w-4xl rounded-lg border border-border bg-card p-3"
   >
-    <div class="flex flex-col gap-3">
+    <div class="flex flex-col gap-2.5">
       <div>
         <span class="text-[10px] uppercase tracking-wider text-muted-foreground">审批</span>
-        <strong class="ml-2 text-sm">技能代理等待确认</strong>
+        <strong class="ml-2 text-sm">Agent 等待确认</strong>
       </div>
 
-      <div class="flex gap-3 text-xs text-muted-foreground">
+      <div class="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
         <span>会话编号：<strong class="text-foreground">{{ pendingApproval.sessionId }}</strong></span>
         <span v-if="currentAction?.name">操作：<strong class="text-foreground">{{ currentAction.name }}</strong></span>
       </div>
 
-      <div v-if="currentAction" class="flex flex-col gap-2 rounded-lg bg-secondary p-3">
+      <div v-if="currentAction" class="flex flex-col gap-2 rounded-lg bg-secondary p-2.5">
         <p class="text-sm">{{ approvalDescription }}</p>
         <p v-if="currentAction.policy_reason" class="text-xs" :class="isBlockedAction ? 'text-destructive' : 'text-muted-foreground'">{{ currentAction.policy_reason }}</p>
 
@@ -83,14 +83,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { useChatStore } from "@/stores/chat";
 
 const store = useChatStore();
-const { skillAgentPendingApproval } = storeToRefs(store);
+const { agentPendingApproval } = storeToRefs(store);
 
 const approvalBarEl = ref(null);
 const editedCommand = ref("");
 const editedPath = ref("");
 const editedContent = ref("");
 
-const pendingApproval = computed(() => skillAgentPendingApproval.value);
+const pendingApproval = computed(() => agentPendingApproval.value);
 const currentAction = computed(() => {
   const actions = pendingApproval.value?.approvalRequest?.action_requests;
   return Array.isArray(actions) && actions.length ? actions[0] : null;
@@ -125,14 +125,14 @@ watch(pendingApproval, async (value) => {
 
 function approve() {
   if (!currentAction.value) return;
-  store.resumeSkillAgentApproval({
+  store.resumeAgentApproval({
     type: "approve",
     name: currentAction.value.name,
     args: currentAction.value.args || {},
   });
 }
 function reject() {
-  store.resumeSkillAgentApproval({
+  store.resumeAgentApproval({
     type: "reject",
     message: isBlockedAction.value
       ? `用户关闭了被策略禁止的操作：${currentAction.value?.policy_reason || "策略已阻止该操作"}。`
@@ -147,7 +147,7 @@ function editAndContinue() {
   if (currentAction.value.name === "run_command") nextArgs.command = editedCommand.value || nextArgs.command || "";
   if (usesFilePath.value) nextArgs.path = editedPath.value || nextArgs.path || "";
   if (usesContent.value) nextArgs.content = editedContent.value ?? nextArgs.content ?? "";
-  store.resumeSkillAgentApproval({
+  store.resumeAgentApproval({
     type: "edit",
     name: currentAction.value.name,
     args: nextArgs,

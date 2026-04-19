@@ -1,5 +1,5 @@
 const DEFAULT_TIMEOUT = 30_000;
-const API_BASE_URL = "http://localhost:8000";
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
 
 export async function api(path, options = {}) {
   const { signal: callerSignal, timeoutMs = DEFAULT_TIMEOUT, ...rest } = options;
@@ -17,7 +17,7 @@ export async function api(path, options = {}) {
     }
   }
 
-  const url = `${API_BASE_URL}${path}`;
+  const url = path.startsWith("http") ? path : `${API_BASE_URL}${path}`;
   let response;
   try {
     response = await fetch(url, {

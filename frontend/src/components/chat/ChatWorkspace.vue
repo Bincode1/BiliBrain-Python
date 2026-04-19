@@ -4,14 +4,14 @@
     <div class="min-h-0 flex flex-col overflow-hidden flex-1">
       <ChatMessages />
 
-      <div v-if="chatStatus.show" :class="['mx-auto max-w-3xl px-4 shrink-0 rounded-lg px-3 py-1.5 text-xs', chatStatus.error ? 'bg-destructive/10 text-destructive' : 'bg-muted text-muted-foreground']">
+      <div v-if="chatStatus.show" :class="['mx-auto max-w-4xl shrink-0 rounded-md px-3 py-1 text-[12px]', chatStatus.error ? 'bg-destructive/10 text-destructive' : 'bg-muted text-muted-foreground']">
         {{ chatStatus.message }}
       </div>
     </div>
 
     <!-- Composer (always pinned at bottom) -->
-    <div class="flex justify-center px-4 pb-4 pt-2">
-      <div class="w-full max-w-3xl">
+    <div class="flex justify-center px-3 pb-3 pt-1.5">
+      <div class="w-full max-w-4xl">
         <ChatComposer :folder-only="folderOnly" />
       </div>
     </div>

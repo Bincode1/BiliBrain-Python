@@ -1,10 +1,10 @@
 <template>
-  <section class="flex h-full flex-col gap-3 overflow-auto p-4">
+  <section class="flex h-full flex-col gap-3 overflow-auto p-3">
     <!-- Header -->
-    <header class="flex items-center gap-4 border-b border-border px-6 py-4">
+    <header class="flex items-center gap-4 border-b border-border px-4 py-3">
       <div>
         <span class="text-[10px] uppercase tracking-[0.08em] text-muted-foreground">技能目录</span>
-        <h2 class="text-xl font-semibold">Skills</h2>
+        <h2 class="text-lg font-semibold">Skills</h2>
       </div>
       <div class="ml-auto flex gap-2">
         <Button size="sm" :disabled="refreshing" @click="refreshPanel()">{{ refreshing ? "刷新中..." : "刷新" }}</Button>
@@ -21,7 +21,7 @@
     <p v-if="errorText" class="text-xs text-destructive">{{ errorText }}</p>
 
     <!-- Empty state -->
-    <div v-if="!skills.length && !refreshing" class="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border py-16 text-center">
+    <div v-if="!skills.length && !refreshing" class="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border py-16 text-center">
       <strong class="text-lg">还没有可展示的 Skills</strong>
       <p class="text-sm text-muted-foreground">先刷新一次，或检查技能目录配置。</p>
     </div>
@@ -29,13 +29,13 @@
     <div v-else-if="refreshing && !skills.length" class="flex items-center justify-center py-16 text-sm text-muted-foreground">正在读取技能列表...</div>
 
     <!-- Skill grid -->
-    <div v-else class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+    <div v-else class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
       <Card
         v-for="item in skills"
         :key="item.name"
         class="overflow-hidden transition-all hover:shadow-md"
       >
-        <CardHeader class="p-4 pb-2">
+        <CardHeader class="p-3 pb-1.5">
           <div class="flex items-center justify-between">
             <div>
               <h3 class="text-base font-semibold">{{ item.name }}</h3>
@@ -47,7 +47,7 @@
             />
           </div>
         </CardHeader>
-        <CardContent class="p-4 pt-2">
+        <CardContent class="p-3 pt-1.5">
           <p class="mb-3 line-clamp-3 text-sm text-muted-foreground">{{ item.description || "暂无描述" }}</p>
           <div class="flex flex-wrap gap-2 text-xs text-muted-foreground">
             <span>工具 {{ item.allowed_tools?.length || 0 }}</span>

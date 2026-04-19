@@ -4,6 +4,10 @@
   box-sizing: border-box;
 }
 
+html {
+  font-size: 16px;
+}
+
 body {
   margin: 0;
   color: var(--foreground);
@@ -11,6 +15,7 @@ body {
   background: var(--background);
   font-feature-settings: "kern" 1;
   font-kerning: normal;
+  font-variant-numeric: tabular-nums;
 }
 
 #app {

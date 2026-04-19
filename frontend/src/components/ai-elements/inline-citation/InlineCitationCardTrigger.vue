@@ -7,6 +7,7 @@ import { computed } from 'vue'
 
 const props = defineProps<{
   sources: string[]
+  label?: string
   class?: HTMLAttributes['class']
 }>()
 
@@ -29,7 +30,7 @@ const displayText = computed(() => {
 <template>
   <HoverCardTrigger as-child>
     <Badge :class="cn('ml-1 rounded-full', props.class)" variant="secondary">
-      {{ displayText }}
+      {{ props.label || displayText }}
     </Badge>
   </HoverCardTrigger>
 </template>

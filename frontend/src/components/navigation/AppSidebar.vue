@@ -5,13 +5,13 @@
         <SidebarMenuItem>
           <SidebarMenuButton size="lg" tooltip="BiliBrain">
             <div
-              class="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground text-sm font-bold"
+              class="flex aspect-square size-7.5 items-center justify-center rounded-lg bg-primary text-primary-foreground text-[13px] font-bold"
             >
               B
             </div>
             <div class="flex flex-col gap-0.5 leading-none">
-              <span class="font-semibold">BiliBrain</span>
-              <span class="text-[11px] text-muted-foreground">Personal AI</span>
+              <span class="text-[13px] font-semibold">BiliBrain</span>
+              <span class="text-[12px] font-medium text-foreground/80">Personal AI</span>
             </div>
           </SidebarMenuButton>
         </SidebarMenuItem>
@@ -47,7 +47,7 @@
           <Button
             variant="ghost"
             size="sm"
-            class="h-5 gap-1 px-1.5 text-[11px] group-data-[collapsible=icon]:hidden"
+            class="h-5 gap-1 px-1.5 text-[10px] group-data-[collapsible=icon]:hidden"
             @click="chatStore.createConversation"
           >
             <Plus class="size-3" />
@@ -56,12 +56,12 @@
         </SidebarGroupLabel>
         <SidebarGroupContent>
           <!-- Loading -->
-          <div v-if="chatConversationsLoading" class="flex items-center justify-center py-4 text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
+          <div v-if="chatConversationsLoading" class="flex items-center justify-center py-4 text-[12px] font-medium text-foreground/72 group-data-[collapsible=icon]:hidden">
             加载中...
           </div>
 
           <!-- Empty -->
-          <div v-else-if="!chatConversations.length" class="px-2 py-3 text-[11px] text-muted-foreground group-data-[collapsible=icon]:hidden">
+          <div v-else-if="!chatConversations.length" class="px-2 py-3 text-[12px] text-foreground/72 group-data-[collapsible=icon]:hidden">
             还没有会话
           </div>
 

@@ -1,10 +1,10 @@
 <template>
-  <section class="flex h-full flex-col gap-4 overflow-auto p-4">
+  <section class="flex h-full flex-col gap-3 overflow-auto p-3">
     <!-- Header -->
-    <header class="flex items-center gap-4 border-b border-border px-6 py-4">
+    <header class="flex items-center gap-4 border-b border-border px-4 py-3">
       <div>
         <span class="text-[10px] uppercase tracking-[0.08em] text-muted-foreground">工具目录</span>
-        <h2 class="text-xl font-semibold">Tools</h2>
+        <h2 class="text-lg font-semibold">Tools</h2>
       </div>
       <div class="ml-auto flex gap-3 text-xs text-muted-foreground">
         <span>可用 {{ readyCount }}</span>
@@ -21,7 +21,7 @@
         class="cursor-pointer transition-all hover:shadow-md"
         @click="selectedToolId = item.id"
       >
-        <CardContent class="p-4">
+        <CardContent class="p-3">
           <div class="flex items-start justify-between gap-2">
             <div>
               <strong class="text-sm">{{ item.name }}</strong>

@@ -6,14 +6,14 @@
 
   <!-- Conversation mode (≤100 messages): uses StickToBottom for auto-scroll -->
   <Conversation v-else-if="chatMessages.length && !useVirtualMode" class="min-h-0 flex-1">
-    <ConversationContent class="gap-4 max-w-[720px] mx-auto px-4">
+    <ConversationContent class="mx-auto max-w-[860px] gap-3 px-3 py-3">
       <ChatMessageItem
         v-for="(message, index) in chatMessages"
         :key="message.message_id || index"
         :message="message"
         @toggle-sources="store.toggleMessageSources"
       />
-      <SkillApprovalBar />
+      <AgentApprovalBar />
     </ConversationContent>
     <ConversationScrollButton />
   </Conversation>
@@ -22,9 +22,9 @@
   <div
     v-else-if="chatMessages.length && useVirtualMode"
     :ref="setContainerRef"
-    class="min-h-0 flex-1 flex-col gap-4 overflow-y-auto scrollbar-gutter-stable"
+    class="min-h-0 flex-1 flex-col gap-3 overflow-y-auto scrollbar-gutter-stable"
   >
-    <div class="max-w-[720px] mx-auto px-4">
+    <div class="mx-auto max-w-[860px] px-3 py-3">
       <div :style="spacerTopStyle" />
       <ChatMessageItem
         v-for="message in visibleMessages"
@@ -33,14 +33,14 @@
         :data-vt-index="message._vtIndex"
         @toggle-sources="store.toggleMessageSources"
       />
-      <SkillApprovalBar />
+      <AgentApprovalBar />
       <div :style="spacerBottomStyle" />
     </div>
   </div>
 
   <!-- Empty state -->
-  <ConversationEmptyState v-else class="max-w-[720px] mx-auto px-4">
-    <div class="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border px-8 py-10 text-center">
+  <ConversationEmptyState v-else class="mx-auto max-w-[860px] px-3">
+    <div class="flex flex-col items-center gap-2.5 rounded-lg border border-dashed border-border px-6 py-8 text-center">
       <span class="text-[10px] uppercase tracking-widest text-muted-foreground">
         {{ chatConversations.length ? "开始对话" : "新会话" }}
       </span>
@@ -70,7 +70,7 @@ import {
   ConversationEmptyState,
 } from "@/components/ai-elements/conversation";
 import ChatMessageItem from "./ChatMessageItem.vue";
-import SkillApprovalBar from "./SkillApprovalBar.vue";
+import AgentApprovalBar from "./AgentApprovalBar.vue";
 
 const VIRTUAL_SCROLL_THRESHOLD = 100;
 

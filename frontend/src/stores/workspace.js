@@ -60,7 +60,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     // Chat
     chatStatus: chatStore.chatStatus,
     chatInput: chatStore.chatInput,
-    skillAgentPendingApproval: chatStore.skillAgentPendingApproval,
+    agentPendingApproval: chatStore.agentPendingApproval,
     chatScopeMode: chatStore.chatScopeMode,
     chatScopeFolderId: chatStore.chatScopeFolderId,
     chatScopeVideoBvid: chatStore.chatScopeVideoBvid,
@@ -89,7 +89,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     deleteConversation: chatStore.deleteConversation,
     renameConversation: chatStore.renameConversation,
     askQuestion: chatStore.askQuestion,
-    resumeSkillAgentApproval: chatStore.resumeSkillAgentApproval,
+    resumeAgentApproval: chatStore.resumeAgentApproval,
 
     // Dialog
     dialogOpen: dialogStore.dialogOpen,
