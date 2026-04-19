@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import shutil
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -22,7 +22,7 @@ from bilibrain.tools.policy import (
     evaluate_command_request,
 )
 from bilibrain.tools.registry import ToolRegistryItem, build_default_tool_registry
-from bilibrain.tools.workspace import create_workspace_session, get_workspace_root
+from bilibrain.tools.workspace import get_workspace_root
 
 
 class ToolService:
@@ -44,6 +44,19 @@ class ToolService:
         self.enabled = bool(enabled)
         self._workspace_cache: dict[str, dict[str, Any]] = {}
 
+    def _prune_workspace_directories(self) -> None:
+        self.workspace_base_root.mkdir(parents=True, exist_ok=True)
+        for child in list(self.workspace_base_root.iterdir()):
+            if child.name == "default":
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+                continue
+            try:
+                child.unlink()
+            except OSError:
+                pass
+
     def list_tools(self) -> list[dict[str, Any]]:
         tools = []
         for item in self.registry.values():
@@ -63,33 +76,16 @@ class ToolService:
     async def list_workspaces(
         self, *, feature_name: str | None = None, limit: int = 100
     ) -> list[dict[str, Any]]:
-        if self.db is not None:
-            rows = await self.db.list_tool_workspaces(
-                feature_name=feature_name, limit=limit
-            )
-        else:
-            rows = list(self._workspace_cache.values())
-            if feature_name:
-                rows = [row for row in rows if row.get("feature_name") == feature_name]
-            rows = list(reversed(rows))[: max(int(limit or 100), 1)]
-
-        result = []
-        for row in rows:
-            workspace_root = get_workspace_root(
-                self.workspace_base_root, row["workspace_id"]
-            )
-            title = str(row.get("title") or "").strip()
-            feature = str(row.get("feature_name") or "workspace")
-            short_id = str(row["workspace_id"])[:8]
-            display_name = title or f"{feature}:{short_id}"
-            result.append(
-                {
-                    **row,
-                    "root_path": str(workspace_root),
-                    "display_name": display_name,
-                }
-            )
-        return result
+        if feature_name and str(feature_name).strip() != "workspace":
+            return []
+        workspace = await self.get_or_create_default_workspace()
+        return [
+            {
+                **workspace,
+                "display_name": str(workspace.get("title") or "").strip()
+                or "Default Workspace",
+            }
+        ]
 
     async def create_workspace(
         self,
@@ -99,49 +95,51 @@ class ToolService:
         title: str | None = None,
         actor: str = "system",
     ) -> dict[str, Any]:
+        return await self.get_or_create_default_workspace(actor=actor)
+
+    async def get_or_create_default_workspace(
+        self,
+        *,
+        actor: str = "system",
+    ) -> dict[str, Any]:
         if self.db is not None:
-            row = await create_workspace_session(
-                self.db,
-                feature_name=feature_name,
-                conversation_id=conversation_id,
-                title=title,
-                actor=actor,
-            )
+            row = await self.db.ensure_default_tool_workspace(actor=actor)
         else:
-            workspace_id = f"{feature_name}-{len(self._workspace_cache) + 1}"
-            row = {
-                "workspace_id": workspace_id,
-                "scope_key": f"{feature_name}:{conversation_id}"
-                if conversation_id
-                else feature_name,
-                "feature_name": feature_name,
-                "conversation_id": conversation_id,
-                "title": title or "",
-                "actor": actor,
-            }
-            self._workspace_cache[workspace_id] = row
-        workspace_root = get_workspace_root(
-            self.workspace_base_root, row["workspace_id"]
-        )
+            row = self._workspace_cache.get("default")
+            if row is None:
+                row = {
+                    "workspace_id": "default",
+                    "scope_key": "workspace:default",
+                    "feature_name": "workspace",
+                    "conversation_id": None,
+                    "title": "Default Workspace",
+                    "actor": actor,
+                }
+            self._workspace_cache = {"default": row}
+        self._prune_workspace_directories()
+        workspace_root = get_workspace_root(self.workspace_base_root, row["workspace_id"])
         return {
             **row,
             "root_path": str(workspace_root),
         }
 
     async def get_workspace(self, workspace_id: str) -> dict[str, Any]:
+        normalized_workspace_id = str(workspace_id or "").strip() or "default"
+        if normalized_workspace_id != "default":
+            raise WorkspaceError("Only the default workspace exists.")
         workspace = (
-            await self.db.get_tool_workspace(workspace_id)
+            await self.db.get_tool_workspace("default")
             if self.db is not None
-            else self._workspace_cache.get(workspace_id)
+            else self._workspace_cache.get("default")
         )
         if not workspace:
             raise WorkspaceError("Workspace does not exist.")
-        workspace_root = get_workspace_root(self.workspace_base_root, workspace_id)
+        workspace_root = get_workspace_root(self.workspace_base_root, "default")
         return {
             **workspace,
             "root_path": str(workspace_root),
             "display_name": str(workspace.get("title") or "").strip()
-            or f"{workspace.get('feature_name') or 'workspace'}:{workspace_id[:8]}",
+            or "Default Workspace",
         }
 
     async def call_tool(
@@ -159,8 +157,11 @@ class ToolService:
 
         timer = ToolCallTimer()
         resolved_trace_id = str(trace_id or "").strip() or uuid4().hex
+        normalized_workspace_id = str(workspace_id or "").strip() or "default"
+        if normalized_workspace_id != "default":
+            raise WorkspaceError("Only the default workspace is supported.")
         request = ToolCallRequest(
-            workspace_id=workspace_id,
+            workspace_id=normalized_workspace_id,
             tool_name=tool_name,
             arguments=arguments,
             actor=actor,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +34,7 @@ class SkillService:
         self,
         *,
         registry: SkillRegistry,
-        db,
+        db=None,
         policy: SkillPolicy | None = None,
         enabled: bool = True,
     ) -> None:
@@ -124,6 +126,7 @@ class SkillService:
                 reason=f"Skill '{name}' is not available because skills are disabled.",
             )
         normalized_name = str(name or "").strip()
+        normalized_actor = str(actor or "").strip().lower() or "agent"
         if not normalized_name:
             return SkillPolicyDecision(
                 action=SkillPolicyAction.DENY,
@@ -150,7 +153,7 @@ class SkillService:
         return evaluate_skill_request(
             self.policy,
             skill_name=normalized_name,
-            actor=actor,
+            actor=normalized_actor,
         )
 
     def approve_skill(
@@ -200,10 +203,21 @@ class SkillService:
         }
 
     def _render_skill_body(self, *, body: str, skill_root: str) -> str:
-        rendered = str(body or "")
-        for placeholder in _SKILL_DIR_PLACEHOLDERS:
-            rendered = rendered.replace(placeholder, str(skill_root or ""))
-        return rendered
+        resolved_root = str(Path(skill_root or "").resolve())
+        placeholder_pattern = "|".join(re.escape(item) for item in _SKILL_DIR_PLACEHOLDERS)
+
+        def replace_placeholder(match: re.Match[str]) -> str:
+            suffix = str(match.group("suffix") or "")
+            if not suffix:
+                return resolved_root
+            parts = [part for part in suffix.replace("\\", "/").split("/") if part]
+            return str(Path(resolved_root, *parts))
+
+        return re.sub(
+            rf"(?P<placeholder>{placeholder_pattern})(?P<suffix>(?:[/\\][^\s'\"`<>]+)*)",
+            replace_placeholder,
+            str(body or ""),
+        )
 
     def _build_resource_map(self, *, skill_root: str, resources: list[str]) -> dict[str, str]:
         base_path = Path(skill_root)

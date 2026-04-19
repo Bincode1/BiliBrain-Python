@@ -8,6 +8,19 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from bilibrain.core.runtime import Runtime
 from bilibrain.graphs.qa.events import make_sse_event
+from bilibrain.services.chat_storage import (
+    append_chat_message_dual_write,
+    create_chat_session_dual_write,
+    get_chat_session,
+    list_recent_chat_session_messages,
+    read_chat_session_pending_approval,
+)
+from bilibrain.services.runtime_events import (
+    build_persisting_runtime_event_callback,
+    clear_pending_approval_state,
+    persist_pending_approval_state,
+    persist_runtime_event,
+)
 from bilibrain.skills import build_skill_langchain_tools
 from bilibrain.tools import build_langchain_tools
 from bilibrain.tools.policy import evaluate_command_request
@@ -27,7 +40,184 @@ def _build_skills_state(runtime: Runtime, session_id: str) -> dict[str, Any]:
     }
 
 
-def build_skill_agent_session_id(
+def _current_action_from_request(approval_request: dict[str, Any] | None) -> dict[str, Any]:
+    actions = approval_request.get("action_requests") if isinstance(approval_request, dict) else None
+    if not isinstance(actions, list) or not actions:
+        raise RuntimeError("当前审批请求缺少可执行操作。")
+    action = actions[0]
+    if not isinstance(action, dict):
+        raise RuntimeError("当前审批请求格式无效。")
+    return dict(action)
+
+
+def _merge_decision_args(action: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(action.get("args") or {})
+    decision_args = decision.get("args")
+    if isinstance(decision_args, dict):
+        merged.update(decision_args)
+    return merged
+
+
+def _normalize_resume_decision(
+    approval_request: dict[str, Any],
+    decision: dict[str, Any],
+) -> tuple[str, dict[str, Any], str, dict[str, Any]]:
+    action = _current_action_from_request(approval_request)
+    action_name = str(action.get("name") or "").strip()
+    action_id = str(action.get("id") or approval_request.get("interrupt_id") or "").strip()
+    if not action_name or not action_id:
+        raise RuntimeError("当前审批请求缺少必要标识。")
+
+    decision_type = str(decision.get("type") or "").strip().lower() or "approve"
+    if decision_type not in {"approve", "edit", "reject"}:
+        raise RuntimeError("审批结果无效。")
+
+    if decision_type in {"approve", "edit"}:
+        decision_name = str(decision.get("name") or action_name).strip()
+        decision_id = str(decision.get("id") or action_id).strip()
+        if decision_name != action_name or decision_id != action_id:
+            raise RuntimeError("审批操作与当前待处理请求不一致。")
+
+    return decision_type, action, action_id, _merge_decision_args(action, decision)
+
+
+async def _persist_pending_approval(
+    runtime: Runtime,
+    *,
+    conversation_id: int,
+    session_id: str,
+    workspace_id: str,
+    approval_request: dict[str, Any],
+) -> dict[str, Any]:
+    return await persist_pending_approval_state(
+        runtime,
+        conversation_id=int(conversation_id),
+        session_id=session_id,
+        workspace_id=workspace_id,
+        approval_request=approval_request,
+    )
+
+
+async def _load_pending_approval(
+    runtime: Runtime,
+    *,
+    conversation_id: int,
+    session_id: str,
+) -> dict[str, Any]:
+    payload = await read_chat_session_pending_approval(runtime, conversation_id)
+    if not payload:
+        raise RuntimeError("当前没有待审批的操作。")
+    saved_session_id = str(payload.get("session_id") or "").strip()
+    if saved_session_id and saved_session_id != str(session_id).strip():
+        raise RuntimeError("审批会话已失效，请重新发起操作。")
+    return payload
+
+
+async def _consume_pending_approval(
+    runtime: Runtime,
+    *,
+    conversation_id: int,
+    session_id: str,
+    decision: dict[str, Any],
+) -> tuple[dict[str, Any], str, dict[str, Any], dict[str, Any]]:
+    pending = await _load_pending_approval(
+        runtime,
+        conversation_id=conversation_id,
+        session_id=session_id,
+    )
+    approval_request = dict(pending.get("approval_request") or {})
+    decision_type, action, action_id, effective_args = _normalize_resume_decision(
+        approval_request,
+        decision,
+    )
+    await clear_pending_approval_state(
+        runtime,
+        conversation_id=int(conversation_id),
+        workspace_id=str(pending.get("workspace_id") or "default"),
+    )
+    await persist_runtime_event(
+        runtime,
+        conversation_id=int(conversation_id),
+        workspace_id=str(pending.get("workspace_id") or "default"),
+        event_type="approval",
+        payload={
+            "phase": decision_type,
+            "name": str(action.get("name") or ""),
+            "approval_id": action_id,
+            "session_id": session_id,
+            "workspace_id": str(pending.get("workspace_id") or ""),
+            "original_args": dict(action.get("args") or {}),
+            "effective_args": effective_args,
+        },
+    )
+    return pending, decision_type, action, effective_args
+
+
+def _summarize_tool_result_answer(
+    tool_name: str,
+    effective_args: dict[str, Any],
+    result_str: str,
+    fallback: str,
+) -> str:
+    try:
+        payload = json.loads(result_str)
+    except json.JSONDecodeError:
+        return fallback
+    if not isinstance(payload, dict):
+        return fallback
+
+    if payload.get("error"):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("detail") or str(error)
+        else:
+            message = str(error)
+        return message or fallback
+
+    result_payload = payload.get("payload")
+    if not isinstance(result_payload, dict):
+        return fallback
+
+    if tool_name == "write_file":
+        path = str(result_payload.get("path") or effective_args.get("path") or "").strip()
+        return f"文件 `{path}` 已成功创建。"
+    if tool_name == "append_file":
+        path = str(result_payload.get("path") or effective_args.get("path") or "").strip()
+        return f"内容已成功追加到文件 `{path}`。"
+    if tool_name == "make_dir":
+        path = str(result_payload.get("path") or effective_args.get("path") or "").strip()
+        return f"目录 `{path}` 已成功创建。"
+    if tool_name == "run_command":
+        return "命令已执行完成。"
+    return fallback
+
+
+async def _flush_persisted_event_tasks(tasks: list[asyncio.Task[None]]) -> None:
+    if not tasks:
+        return
+    pending = [task for task in tasks if not task.done()]
+    if pending:
+        await asyncio.gather(*pending)
+
+
+def _build_persisting_event_callback(
+    runtime: Runtime,
+    *,
+    conversation_id: int,
+    workspace_id: str,
+    downstream: Callable[[str, dict[str, Any]], None] | None,
+    tasks: list[asyncio.Task[None]],
+) -> Callable[[str, dict[str, Any]], None]:
+    return build_persisting_runtime_event_callback(
+        runtime,
+        conversation_id=int(conversation_id),
+        workspace_id=str(workspace_id or "default"),
+        downstream=downstream,
+        tasks=tasks,
+    )
+
+
+def build_agent_session_id(
     *, conversation_id: int | None = None, explicit_session_id: str | None = None
 ) -> str:
     explicit = str(explicit_session_id or "").strip()
@@ -36,11 +226,11 @@ def build_skill_agent_session_id(
     if conversation_id:
         return f"conversation-{int(conversation_id)}"
     raise RuntimeError(
-        "Skill agent session_id is required when conversation_id is not provided."
+        "session_id is required when conversation_id is not provided."
     )
 
 
-def build_skill_agent_prompt(
+def build_agent_prompt(
     runtime: Runtime,
     *,
     session_id: str,
@@ -62,7 +252,7 @@ def build_skill_agent_prompt(
 
     return "\n".join(
         [
-            "你是 BiliBrain 的 Skill Agent。",
+            "你是 BiliBrain 的 Agent。",
             "你的职责是结合会话上下文、可用 skills 和 workspace tools 来完成任务。",
             "原则：",
             "1. prompt 里只提供已激活 skills 的摘要，不提供正文。",
@@ -86,34 +276,30 @@ def build_skill_agent_prompt(
     )
 
 
-async def ensure_skill_agent_conversation(
+async def get_or_create_conversation(
     runtime: Runtime, conversation_id: int | None
 ) -> dict[str, Any]:
     if conversation_id:
-        conversation = await runtime.db.get_chat_conversation(int(conversation_id))
+        conversation = await get_chat_session(runtime, int(conversation_id))
         if not conversation:
             raise RuntimeError("对话会话不存在，请刷新页面后重试。")
         return conversation
-    return await runtime.db.create_chat_conversation(None, title="")
+    return await create_chat_session_dual_write(runtime, folder_id=None, title="")
 
 
-async def ensure_skill_agent_workspace(
-    runtime: Runtime, *, conversation_id: int, actor: str
+async def get_default_workspace(
+    runtime: Runtime, *, actor: str
 ) -> dict[str, Any]:
     if runtime.tool_service is None:
         raise RuntimeError("Tool service is not available.")
-    return await runtime.tool_service.create_workspace(
-        feature_name="skill-agent",
-        conversation_id=conversation_id,
-        title=f"Skill Agent {conversation_id}",
-        actor=actor,
-    )
+    return await runtime.tool_service.get_or_create_default_workspace(actor=actor)
 
 
-async def build_skill_agent_history(
+async def build_agent_history(
     runtime: Runtime, conversation_id: int
 ) -> list[tuple[str, str]]:
-    rows = await runtime.db.list_recent_chat_messages_by_turns(
+    rows = await list_recent_chat_session_messages(
+        runtime,
         int(conversation_id),
         keep_turns=max(int(runtime.settings.chat_recent_turns_to_keep or 5), 1),
     )
@@ -249,7 +435,7 @@ def _build_skill_approval_request(
 # Core agent loop (non-streaming)
 # ---------------------------------------------------------------------------
 
-async def _run_skill_agent_loop(
+async def _run_agent_loop(
     runtime: Runtime,
     *,
     messages: list[Any],
@@ -263,7 +449,7 @@ async def _run_skill_agent_loop(
 
     for _round in range(_MAX_ROUNDS):
         if event_callback is not None:
-            event_callback("status", {"delta": "Skill Agent 正在思考并决定下一步..."})
+            event_callback("status", {"delta": "Agent 正在思考并决定下一步..."})
 
         response = await llm.ainvoke(messages)
         tool_calls = getattr(response, "tool_calls", None) or []
@@ -337,21 +523,21 @@ async def _run_skill_agent_loop(
 # Non-streaming entry
 # ---------------------------------------------------------------------------
 
-async def answer_with_skill_agent(
+async def answer_with_agent_runtime(
     runtime: Runtime,
     *,
     query: str,
     conversation_id: int | None = None,
     session_id: str | None = None,
     approval_mode=None,
-    actor: str = "skill-agent",
+    actor: str = "agent",
 ) -> dict[str, Any]:
     if runtime.skill_service is None:
         raise RuntimeError("Skill service is not available.")
     if runtime.tool_service is None:
         raise RuntimeError("Tool service is not available.")
 
-    result = await _execute_skill_agent_turn(
+    result = await _execute_agent_turn(
         runtime,
         query=query,
         conversation_id=conversation_id,
@@ -363,7 +549,7 @@ async def answer_with_skill_agent(
     return result
 
 
-async def _execute_skill_agent_turn(
+async def _execute_agent_turn(
     runtime: Runtime,
     *,
     query: str,
@@ -373,121 +559,144 @@ async def _execute_skill_agent_turn(
     actor: str,
     event_callback: Callable[[str, dict[str, Any]], None] | None,
 ) -> dict[str, Any]:
-    conversation = await ensure_skill_agent_conversation(runtime, conversation_id)
-    resolved_conversation_id = int(conversation["conversation_id"])
-    resolved_session_id = build_skill_agent_session_id(
-        conversation_id=resolved_conversation_id,
-        explicit_session_id=session_id,
-    )
-    workspace = await ensure_skill_agent_workspace(
-        runtime, conversation_id=resolved_conversation_id, actor=actor
-    )
-    history = await build_skill_agent_history(runtime, resolved_conversation_id)
+    persisted_event_tasks: list[asyncio.Task[None]] = []
+    try:
+        conversation = await get_or_create_conversation(runtime, conversation_id)
+        resolved_conversation_id = int(conversation["conversation_id"])
+        resolved_session_id = build_agent_session_id(
+            conversation_id=resolved_conversation_id,
+            explicit_session_id=session_id,
+        )
+        workspace = await get_default_workspace(runtime, actor=actor)
+        persisted_event_callback = _build_persisting_event_callback(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            workspace_id=workspace["workspace_id"],
+            downstream=event_callback,
+            tasks=persisted_event_tasks,
+        )
+        history = await build_agent_history(runtime, resolved_conversation_id)
 
-    await runtime.db.append_chat_message(
-        resolved_conversation_id,
-        role="user",
-        content=query,
-    )
-    if event_callback is not None:
-        event_callback(
-            "status", {"delta": "Skill Agent 正在加载 skills 与 workspace tools..."}
+        await append_chat_message_dual_write(
+            runtime,
+            resolved_conversation_id,
+            role="user",
+            content=query,
+        )
+        if event_callback is not None:
+            event_callback(
+                "status", {"delta": "Agent 正在加载 skills 与 workspace tools..."}
+            )
+
+        skill_tools = build_skill_langchain_tools(
+            runtime.skill_service,
+            session_id=resolved_session_id,
+            actor=actor,
+            event_callback=persisted_event_callback,
+        )
+        workspace_tools = build_langchain_tools(
+            runtime.tool_service,
+            workspace_id=workspace["workspace_id"],
+            actor=actor,
+            approval_mode=approval_mode,
+            event_callback=persisted_event_callback,
+        )
+        all_tools = [*skill_tools, *workspace_tools]
+        prompt = build_agent_prompt(
+            runtime,
+            session_id=resolved_session_id,
+            workspace_id=workspace["workspace_id"],
+            actor=actor,
         )
 
-    skill_tools = build_skill_langchain_tools(
-        runtime.skill_service,
-        session_id=resolved_session_id,
-        actor=actor,
-        event_callback=event_callback,
-    )
-    workspace_tools = build_langchain_tools(
-        runtime.tool_service,
-        workspace_id=workspace["workspace_id"],
-        actor=actor,
-        approval_mode=approval_mode,
-        event_callback=event_callback,
-    )
-    all_tools = [*skill_tools, *workspace_tools]
-    prompt = build_skill_agent_prompt(
-        runtime,
-        session_id=resolved_session_id,
-        workspace_id=workspace["workspace_id"],
-        actor=actor,
-    )
+        messages: list[Any] = [SystemMessage(content=prompt)]
+        for role, content in history:
+            if role == "human":
+                messages.append(HumanMessage(content=content))
+            else:
+                messages.append(AIMessage(content=content))
+        messages.append(HumanMessage(content=query))
 
-    # Build messages
-    messages: list[Any] = [SystemMessage(content=prompt)]
-    for role, content in history:
-        if role == "human":
-            messages.append(HumanMessage(content=content))
-        else:
-            messages.append(AIMessage(content=content))
-    messages.append(HumanMessage(content=query))
+        answer_text, approval_request = await _run_agent_loop(
+            runtime,
+            messages=messages,
+            tools=all_tools,
+            session_id=resolved_session_id,
+            actor=actor,
+            event_callback=persisted_event_callback,
+        )
 
-    answer_text, approval_request = await _run_skill_agent_loop(
-        runtime,
-        messages=messages,
-        tools=all_tools,
-        session_id=resolved_session_id,
-        actor=actor,
-        event_callback=event_callback,
-    )
+        if approval_request is not None:
+            await _persist_pending_approval(
+                runtime,
+                conversation_id=resolved_conversation_id,
+                session_id=resolved_session_id,
+                workspace_id=workspace["workspace_id"],
+                approval_request=approval_request,
+            )
+            if event_callback is not None:
+                event_callback("status", {"delta": "Agent 需要人工确认后才能继续。"})
+            return {
+                "status": "pending_approval",
+                "conversation_id": resolved_conversation_id,
+                "session_id": resolved_session_id,
+                "workspace_id": workspace["workspace_id"],
+                "approval_request": approval_request,
+                **_build_skills_state(runtime, resolved_session_id),
+            }
 
-    if approval_request is not None:
+        await clear_pending_approval_state(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            workspace_id=str(workspace["workspace_id"] or "default"),
+        )
+        if not answer_text:
+            answer_text = "当前没有生成有效回答。"
         if event_callback is not None:
-            event_callback("status", {"delta": "Skill Agent 需要人工确认后才能继续。"})
+            event_callback("status", {"delta": "Agent 已生成最终回答。"})
+
+        assistant_message = await append_chat_message_dual_write(
+            runtime,
+            resolved_conversation_id,
+            role="assistant",
+            content=answer_text,
+        )
+
         return {
-            "status": "pending_approval",
+            "status": "completed",
             "conversation_id": resolved_conversation_id,
             "session_id": resolved_session_id,
             "workspace_id": workspace["workspace_id"],
-            "approval_request": approval_request,
+            "answer": answer_text,
+            "assistant_message": assistant_message,
             **_build_skills_state(runtime, resolved_session_id),
         }
-
-    if not answer_text:
-        answer_text = "当前没有生成有效回答。"
-    if event_callback is not None:
-        event_callback("status", {"delta": "Skill Agent 已生成最终回答。"})
-
-    assistant_message = await runtime.db.append_chat_message(
-        resolved_conversation_id,
-        role="assistant",
-        content=answer_text,
-    )
-
-    return {
-        "status": "completed",
-        "conversation_id": resolved_conversation_id,
-        "session_id": resolved_session_id,
-        "workspace_id": workspace["workspace_id"],
-        "answer": answer_text,
-        "assistant_message": assistant_message,
-        **_build_skills_state(runtime, resolved_session_id),
-    }
+    finally:
+        await _flush_persisted_event_tasks(persisted_event_tasks)
 
 
 # ---------------------------------------------------------------------------
 # Streaming entry
 # ---------------------------------------------------------------------------
 
-async def stream_answer_with_skill_agent_events(
+async def stream_agent_events(
     runtime: Runtime,
     *,
     query: str,
     conversation_id: int | None = None,
     session_id: str | None = None,
     approval_mode=None,
-    actor: str = "skill-agent",
+    actor: str = "agent",
 ) -> AsyncIterator[str]:
-    conversation = await ensure_skill_agent_conversation(runtime, conversation_id)
+    persisted_event_tasks: list[asyncio.Task[None]] = []
+    conversation = await get_or_create_conversation(runtime, conversation_id)
     resolved_conversation_id = int(conversation["conversation_id"])
-    resolved_session_id = build_skill_agent_session_id(
+    resolved_session_id = build_agent_session_id(
         conversation_id=resolved_conversation_id,
         explicit_session_id=session_id,
     )
     yield make_sse_event("conversation", {"conversation_id": resolved_conversation_id})
-    yield make_sse_event("status", {"delta": "Skill Agent 正在准备会话上下文..."})
+    yield make_sse_event("status", {"delta": "Agent 正在准备会话上下文..."})
     if getattr(runtime, "skill_service", None) is not None:
         yield make_sse_event(
             "skills",
@@ -500,7 +709,7 @@ async def stream_answer_with_skill_agent_events(
 
     try:
         task = asyncio.create_task(
-            _execute_skill_agent_turn(
+            _execute_agent_turn(
                 runtime,
                 query=query,
                 conversation_id=resolved_conversation_id,
@@ -537,8 +746,13 @@ async def stream_answer_with_skill_agent_events(
             })
             yield make_sse_event("done", {})
             return
+        await clear_pending_approval_state(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            workspace_id=str(result.get("workspace_id") or "default"),
+        )
         yield make_sse_event(
-            "status", {"delta": "Skill Agent 已完成规划，正在返回结果..."}
+            "status", {"delta": "Agent 已完成规划，正在返回结果..."}
         )
         answer_text = str(result.get("answer") or "").strip()
         if answer_text:
@@ -550,7 +764,9 @@ async def stream_answer_with_skill_agent_events(
         })
         yield make_sse_event("done", {})
     except Exception as exc:
-        yield make_sse_event("error", {"detail": str(exc) or "Skill Agent 执行失败"})
+        yield make_sse_event("error", {"detail": str(exc) or "Agent 执行失败"})
+    finally:
+        await _flush_persisted_event_tasks(persisted_event_tasks)
 
 
 # ---------------------------------------------------------------------------
@@ -567,64 +783,138 @@ def _resolve_conversation_id(
         except ValueError:
             pass
     if normalized is None:
-        raise RuntimeError("conversation_id is required to resume the skill agent.")
+        raise RuntimeError("conversation_id is required to resume the agent.")
     return normalized
 
 
-async def resume_skill_agent_turn(
+async def resume_agent_turn(
     runtime: Runtime,
     *,
     session_id: str,
     decision: dict[str, Any],
     conversation_id: int | None = None,
-    actor: str = "skill-agent",
+    actor: str = "agent",
 ) -> dict[str, Any]:
+    persisted_event_tasks: list[asyncio.Task[None]] = []
     if runtime.skill_service is None:
         raise RuntimeError("Skill service is not available.")
     if runtime.tool_service is None:
         raise RuntimeError("Tool service is not available.")
 
-    resolved_conversation_id = _resolve_conversation_id(session_id, conversation_id)
-    conversation = await ensure_skill_agent_conversation(runtime, resolved_conversation_id)
-    resolved_conversation_id = int(conversation["conversation_id"])
-    workspace = await ensure_skill_agent_workspace(
-        runtime, conversation_id=resolved_conversation_id, actor=actor,
-    )
-    workspace_id = workspace["workspace_id"]
+    try:
+        resolved_conversation_id = _resolve_conversation_id(session_id, conversation_id)
+        conversation = await get_or_create_conversation(runtime, resolved_conversation_id)
+        resolved_conversation_id = int(conversation["conversation_id"])
+        pending, decision_type, action, effective_args = await _consume_pending_approval(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            session_id=session_id,
+            decision=decision,
+        )
+        persisted_event_callback = _build_persisting_event_callback(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            workspace_id=str(pending.get("workspace_id") or "default"),
+            downstream=None,
+            tasks=persisted_event_tasks,
+        )
+        workspace = await get_default_workspace(runtime, actor=actor)
+        workspace_id = str(pending.get("workspace_id") or workspace["workspace_id"])
 
-    prompt = build_skill_agent_prompt(
-        runtime, session_id=session_id, workspace_id=workspace_id, actor=actor,
-    )
-    skill_tools = build_skill_langchain_tools(
-        runtime.skill_service, session_id=session_id, actor=actor,
-    )
-    langchain_tools = build_langchain_tools(
-        runtime.tool_service, workspace_id=workspace_id, actor=actor,
-    )
-    all_tools = [*skill_tools, *langchain_tools]
-    _, execute = _build_tool_executor(all_tools, runtime=runtime)
+        prompt = build_agent_prompt(
+            runtime, session_id=session_id, workspace_id=workspace_id, actor=actor,
+        )
+        skill_tools = build_skill_langchain_tools(
+            runtime.skill_service, session_id=session_id, actor=actor,
+            event_callback=persisted_event_callback,
+        )
+        langchain_tools = build_langchain_tools(
+            runtime.tool_service, workspace_id=workspace_id, actor=actor,
+            event_callback=persisted_event_callback,
+        )
+        all_tools = [*skill_tools, *langchain_tools]
+        _, execute = _build_tool_executor(
+            all_tools, runtime=runtime, event_callback=persisted_event_callback,
+        )
 
-    history = await build_skill_agent_history(runtime, resolved_conversation_id)
-    messages: list[Any] = [SystemMessage(content=prompt)]
-    for role, content in history:
-        if role == "human":
-            messages.append(HumanMessage(content=content))
-        else:
-            messages.append(AIMessage(content=content))
+        history = await build_agent_history(runtime, resolved_conversation_id)
+        messages: list[Any] = [SystemMessage(content=prompt)]
+        for role, content in history:
+            if role == "human":
+                messages.append(HumanMessage(content=content))
+            else:
+                messages.append(AIMessage(content=content))
 
-    # Inject approved tool call
-    approved_name = decision.get("name", "")
-    approved_args = decision.get("args", {})
-    approved_id = decision.get("id", f"resume-{approved_name}")
+        approved_name = str(action.get("name") or "")
+        approved_args = effective_args
+        approved_id = str(action.get("id") or f"resume-{approved_name}")
 
-    messages.append(AIMessage(
-        content="",
-        tool_calls=[{"name": approved_name, "args": approved_args, "id": approved_id}],
-    ))
-    decision_type = str(decision.get("type") or "").strip().lower()
-    if decision_type == "reject":
-        answer_text = str(decision.get("message") or "用户拒绝了当前操作。").strip()
-        assistant_message = await runtime.db.append_chat_message(
+        messages.append(AIMessage(
+            content="",
+            tool_calls=[{"name": approved_name, "args": approved_args, "id": approved_id}],
+        ))
+        if decision_type == "reject":
+            answer_text = str(decision.get("message") or "用户拒绝了当前操作。").strip()
+            assistant_message = await append_chat_message_dual_write(
+                runtime,
+                resolved_conversation_id,
+                role="assistant",
+                content=answer_text,
+            )
+            return {
+                "status": "completed",
+                "conversation_id": resolved_conversation_id,
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+                "answer": answer_text,
+                "assistant_message": assistant_message,
+                **_build_skills_state(runtime, session_id),
+            }
+        if approved_name == "skill" and runtime.skill_service is not None:
+            runtime.skill_service.approve_skill(
+                name=str(approved_args.get("name") or ""),
+                session_id=session_id,
+            )
+
+        result_str = await execute(approved_name, approved_args)
+        messages.append(ToolMessage(content=result_str, tool_call_id=approved_id))
+
+        answer_text, next_approval = await _run_agent_loop(
+            runtime,
+            messages=messages,
+            tools=all_tools,
+            session_id=session_id,
+            actor=actor,
+            event_callback=persisted_event_callback,
+        )
+
+        if next_approval is not None:
+            await _persist_pending_approval(
+                runtime,
+                conversation_id=resolved_conversation_id,
+                session_id=session_id,
+                workspace_id=workspace_id,
+                approval_request=next_approval,
+            )
+            return {
+                "status": "pending_approval",
+                "conversation_id": resolved_conversation_id,
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+                "approval_request": next_approval,
+                **_build_skills_state(runtime, session_id),
+            }
+
+        if not answer_text:
+            answer_text = "当前没有生成有效回答。"
+        answer_text = _summarize_tool_result_answer(
+            approved_name,
+            approved_args,
+            result_str,
+            answer_text,
+        )
+        assistant_message = await append_chat_message_dual_write(
+            runtime,
             resolved_conversation_id,
             role="assistant",
             content=answer_text,
@@ -638,65 +928,25 @@ async def resume_skill_agent_turn(
             "assistant_message": assistant_message,
             **_build_skills_state(runtime, session_id),
         }
-    if approved_name == "skill" and runtime.skill_service is not None:
-        runtime.skill_service.approve_skill(
-            name=str(approved_args.get("name") or ""),
-            session_id=session_id,
-        )
-
-    result_str = await execute(approved_name, approved_args)
-    messages.append(ToolMessage(content=result_str, tool_call_id=approved_id))
-
-    answer_text, next_approval = await _run_skill_agent_loop(
-        runtime,
-        messages=messages,
-        tools=all_tools,
-        session_id=session_id,
-        actor=actor,
-    )
-
-    if next_approval is not None:
-        return {
-            "status": "pending_approval",
-            "conversation_id": resolved_conversation_id,
-            "session_id": session_id,
-            "workspace_id": workspace_id,
-            "approval_request": next_approval,
-            **_build_skills_state(runtime, session_id),
-        }
-
-    if not answer_text:
-        answer_text = "当前没有生成有效回答。"
-    assistant_message = await runtime.db.append_chat_message(
-        resolved_conversation_id,
-        role="assistant",
-        content=answer_text,
-    )
-    return {
-        "status": "completed",
-        "conversation_id": resolved_conversation_id,
-        "session_id": session_id,
-        "workspace_id": workspace_id,
-        "answer": answer_text,
-        "assistant_message": assistant_message,
-        **_build_skills_state(runtime, session_id),
-    }
+    finally:
+        await _flush_persisted_event_tasks(persisted_event_tasks)
 
 
-async def stream_resume_skill_agent_turn_events(
+async def stream_resume_agent_events(
     runtime: Runtime,
     *,
     session_id: str,
     decision: dict[str, Any],
     conversation_id: int | None = None,
-    actor: str = "skill-agent",
+    actor: str = "agent",
 ) -> AsyncIterator[str]:
+    persisted_event_tasks: list[asyncio.Task[None]] = []
     normalized_conversation_id = _resolve_conversation_id(session_id, conversation_id)
 
     yield make_sse_event(
         "conversation", {"conversation_id": normalized_conversation_id}
     )
-    yield make_sse_event("status", {"delta": "Skill Agent 正在恢复执行..."})
+    yield make_sse_event("status", {"delta": "Agent 正在恢复执行..."})
     if runtime.skill_service is not None:
         yield make_sse_event(
             "skills",
@@ -709,28 +959,41 @@ async def stream_resume_skill_agent_turn_events(
         queue.put_nowait((event_type, data or {}))
 
     async def run() -> dict[str, Any]:
-        conversation = await ensure_skill_agent_conversation(runtime, normalized_conversation_id)
+        conversation = await get_or_create_conversation(runtime, normalized_conversation_id)
         resolved_conversation_id = int(conversation["conversation_id"])
-        workspace = await ensure_skill_agent_workspace(
-            runtime, conversation_id=resolved_conversation_id, actor=actor,
+        pending, decision_type, action, effective_args = await _consume_pending_approval(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            session_id=session_id,
+            decision=decision,
         )
-        workspace_id = workspace["workspace_id"]
+        workspace = await get_default_workspace(runtime, actor=actor)
+        workspace_id = str(pending.get("workspace_id") or workspace["workspace_id"])
+        persisted_event_callback = _build_persisting_event_callback(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            workspace_id=workspace_id,
+            downstream=emit_event,
+            tasks=persisted_event_tasks,
+        )
 
-        prompt = build_skill_agent_prompt(
+        prompt = build_agent_prompt(
             runtime, session_id=session_id, workspace_id=workspace_id, actor=actor,
         )
         skill_tools = build_skill_langchain_tools(
             runtime.skill_service, session_id=session_id, actor=actor,
-            event_callback=emit_event,
+            event_callback=persisted_event_callback,
         )
         langchain_tools = build_langchain_tools(
             runtime.tool_service, workspace_id=workspace_id, actor=actor,
-            event_callback=emit_event,
+            event_callback=persisted_event_callback,
         )
         all_tools = [*skill_tools, *langchain_tools]
-        _, execute = _build_tool_executor(all_tools, runtime=runtime, event_callback=emit_event)
+        _, execute = _build_tool_executor(
+            all_tools, runtime=runtime, event_callback=persisted_event_callback,
+        )
 
-        history = await build_skill_agent_history(runtime, resolved_conversation_id)
+        history = await build_agent_history(runtime, resolved_conversation_id)
         messages: list[Any] = [SystemMessage(content=prompt)]
         for role, content in history:
             if role == "human":
@@ -739,18 +1002,18 @@ async def stream_resume_skill_agent_turn_events(
                 messages.append(AIMessage(content=content))
 
         # Inject approved tool call
-        approved_name = decision.get("name", "")
-        approved_args = decision.get("args", {})
-        approved_id = decision.get("id", f"resume-{approved_name}")
+        approved_name = str(action.get("name") or "")
+        approved_args = effective_args
+        approved_id = str(action.get("id") or f"resume-{approved_name}")
 
         messages.append(AIMessage(
             content="",
             tool_calls=[{"name": approved_name, "args": approved_args, "id": approved_id}],
         ))
-        decision_type = str(decision.get("type") or "").strip().lower()
         if decision_type == "reject":
             answer_text = str(decision.get("message") or "用户拒绝了当前操作。").strip()
-            await runtime.db.append_chat_message(
+            await append_chat_message_dual_write(
+                runtime,
                 resolved_conversation_id,
                 role="assistant",
                 content=answer_text,
@@ -773,19 +1036,26 @@ async def stream_resume_skill_agent_turn_events(
         result_str = await execute(approved_name, approved_args)
         messages.append(ToolMessage(content=result_str, tool_call_id=approved_id))
 
-        emit_event("status", {"delta": "Skill Agent 已接收审批结果，继续执行..."})
+        emit_event("status", {"delta": "Agent 已接收审批结果，继续执行..."})
 
-        answer_text, next_approval = await _run_skill_agent_loop(
+        answer_text, next_approval = await _run_agent_loop(
             runtime,
             messages=messages,
             tools=all_tools,
             session_id=session_id,
             actor=actor,
-            event_callback=emit_event,
+            event_callback=persisted_event_callback,
         )
 
         if next_approval is not None:
-            emit_event("status", {"delta": "Skill Agent 需要新的人工确认。"})
+            emit_event("status", {"delta": "Agent 需要新的人工确认。"})
+            await _persist_pending_approval(
+                runtime,
+                conversation_id=resolved_conversation_id,
+                session_id=session_id,
+                workspace_id=workspace_id,
+                approval_request=next_approval,
+            )
             return {
                 "status": "pending_approval",
                 "conversation_id": resolved_conversation_id,
@@ -797,12 +1067,19 @@ async def stream_resume_skill_agent_turn_events(
 
         if not answer_text:
             answer_text = "当前没有生成有效回答。"
-        await runtime.db.append_chat_message(
+        answer_text = _summarize_tool_result_answer(
+            approved_name,
+            approved_args,
+            result_str,
+            answer_text,
+        )
+        await append_chat_message_dual_write(
+            runtime,
             resolved_conversation_id,
             role="assistant",
             content=answer_text,
         )
-        emit_event("status", {"delta": "Skill Agent 已生成最终回答。"})
+        emit_event("status", {"delta": "Agent 已生成最终回答。"})
         return {
             "status": "completed",
             "conversation_id": resolved_conversation_id,
@@ -841,6 +1118,11 @@ async def stream_resume_skill_agent_turn_events(
             })
             yield make_sse_event("done", {})
             return
+        await clear_pending_approval_state(
+            runtime,
+            conversation_id=normalized_conversation_id,
+            workspace_id=str(result.get("workspace_id") or "default"),
+        )
         answer_text = str(result.get("answer") or "").strip()
         if answer_text:
             for chunk in _chunk_text(answer_text, chunk_size=48):
@@ -852,8 +1134,10 @@ async def stream_resume_skill_agent_turn_events(
         yield make_sse_event("done", {})
     except Exception as exc:
         yield make_sse_event(
-            "error", {"detail": str(exc) or "Skill Agent 恢复执行失败"}
+            "error", {"detail": str(exc) or "Agent 恢复执行失败"}
         )
+    finally:
+        await _flush_persisted_event_tasks(persisted_event_tasks)
 
 
 def _chunk_text(text: str, *, chunk_size: int = 64) -> list[str]:

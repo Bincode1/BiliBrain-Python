@@ -25,6 +25,10 @@ from bilibrain.services.chat_memory import (
     refresh_context_stats_after_message,
     should_compact_context,
 )
+from bilibrain.services.chat_storage import (
+    append_chat_message_dual_write,
+    ensure_chat_session,
+)
 from bilibrain.services.common import rerank_search_hits
 from bilibrain.services.summary import (
     build_summary_sources,
@@ -81,12 +85,20 @@ async def resolve_scope_and_conversation(state: QAState) -> dict[str, Any]:
 
     if not policy["persist_messages"] and conversation_id is None:
         conversation = None
-    elif conversation_id is None:
-        conversation = await runtime.db.create_chat_conversation(None)
     else:
-        conversation = await runtime.db.get_chat_conversation(int(conversation_id))
+        conversation = await ensure_chat_session(
+            runtime,
+            conversation_id=conversation_id,
+            folder_id=None,
+            title=None,
+        )
         if not conversation and policy["persist_messages"]:
-            conversation = await runtime.db.create_chat_conversation(None)
+            conversation = await ensure_chat_session(
+                runtime,
+                conversation_id=None,
+                folder_id=None,
+                title=None,
+            )
 
     scope = resolve_query_scope(folder_id=folder_id, bvid=bvid, scope_mode=scope_mode)
     resolved_conversation_id = conversation["conversation_id"] if conversation else None
@@ -204,7 +216,12 @@ async def append_user_message(state: QAState) -> dict[str, Any]:
             "messages": [HumanMessage(content=query)],
         }
 
-    user_message = await runtime.db.append_chat_message(conversation_id, "user", query)
+    user_message = await append_chat_message_dual_write(
+        runtime,
+        conversation_id,
+        "user",
+        query,
+    )
     await refresh_context_stats_after_message(
         runtime, conversation_id=conversation_id, message=user_message
     )
@@ -564,7 +581,8 @@ async def append_assistant_message(state: QAState) -> dict[str, Any]:
     if not answer_text or not policy["persist_messages"] or conversation_id is None:
         return {"assistant_message": None}
 
-    assistant_message = await runtime.db.append_chat_message(
+    assistant_message = await append_chat_message_dual_write(
+        runtime,
         conversation_id,
         "assistant",
         answer_text,

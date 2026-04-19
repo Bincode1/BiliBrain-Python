@@ -1,13 +1,28 @@
 from __future__ import annotations
 
+from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 
+class SkillSource(str, Enum):
+    SYSTEM = "system"
+    USER = "user"
+    REPO = "repo"
+
+
+class SkillSourceConfig(BaseModel):
+    source: SkillSource
+    root: Path
+    precedence: int = 0
+
+
 class SkillDescriptor(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     description: str = Field(..., min_length=1)
+    source: SkillSource = SkillSource.SYSTEM
     short_description: str = ""
     when_to_use: str = ""
     input_hint: str = ""

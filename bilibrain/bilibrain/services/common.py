@@ -425,6 +425,117 @@ def rerank_search_hits(
     return rescored[:limit]
 
 
+def rank_chunks(
+    *,
+    query: str,
+    query_embedding: list[float] | None,
+    chunks: list[dict[str, Any]],
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    query_terms = extract_terms(query)
+    ranked: list[dict[str, Any]] = []
+    for chunk in chunks:
+        combined_text = " ".join(
+            [
+                str(chunk.get("video_title") or ""),
+                str(chunk.get("content") or ""),
+                str(chunk.get("manual_tags") or ""),
+            ]
+        ).strip()
+        keyword_score = _keyword_overlap_score(query_terms, combined_text)
+        dense_score = 0.0
+        embedding = chunk.get("embedding")
+        if query_embedding and isinstance(embedding, list):
+            dense_score = max(cosine_similarity(query_embedding, embedding), 0.0)
+        total_score = dense_score * 0.8 + keyword_score * 0.2
+        if total_score <= 0:
+            continue
+        ranked.append({**chunk, "score": total_score})
+    ranked.sort(key=lambda item: item["score"], reverse=True)
+    return ranked[:limit]
+
+
+def rank_bm25_chunks(
+    *,
+    query: str,
+    chunks: list[dict[str, Any]],
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    query_terms = extract_terms(query)
+    ranked: list[dict[str, Any]] = []
+    for chunk in chunks:
+        combined_text = " ".join(
+            [
+                str(chunk.get("video_title") or ""),
+                str(chunk.get("content") or ""),
+                str(chunk.get("manual_tags") or ""),
+            ]
+        ).strip()
+        text_terms = extract_terms(combined_text)
+        overlap = len(query_terms & text_terms)
+        if overlap <= 0:
+            continue
+        normalized = overlap / max(len(query_terms), 1)
+        ranked.append({**chunk, "bm25_score": normalized})
+    ranked.sort(key=lambda item: item["bm25_score"], reverse=True)
+    return ranked[:limit]
+
+
+def hybrid_rerank_hits(
+    *,
+    query: str,
+    dense_hits: list[dict[str, Any]],
+    bm25_hits: list[dict[str, Any]],
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    query_terms = extract_terms(query)
+    merged: dict[str, dict[str, Any]] = {}
+
+    for hit in dense_hits:
+        chunk_id = str(hit.get("chunk_id") or "").strip()
+        if not chunk_id:
+            continue
+        merged[chunk_id] = {**hit}
+
+    for hit in bm25_hits:
+        chunk_id = str(hit.get("chunk_id") or "").strip()
+        if not chunk_id:
+            continue
+        current = merged.get(chunk_id, {})
+        merged[chunk_id] = {**hit, **current, "bm25_score": float(hit.get("bm25_score") or 0.0)}
+
+    reranked: list[dict[str, Any]] = []
+    max_bm25 = max((float(item.get("bm25_score") or 0.0) for item in bm25_hits), default=0.0)
+
+    for hit in merged.values():
+        combined_text = " ".join(
+            [
+                str(hit.get("video_title") or ""),
+                str(hit.get("content") or ""),
+                str(hit.get("manual_tags") or ""),
+            ]
+        ).strip()
+        keyword_score = _keyword_overlap_score(query_terms, combined_text)
+        dense_score = float(hit.get("score") or 0.0)
+        bm25_score = float(hit.get("bm25_score") or 0.0)
+        normalized_bm25 = bm25_score / max(max_bm25, 1.0)
+        total_score = dense_score * 0.55 + normalized_bm25 * 0.3 + keyword_score * 0.15
+        if total_score <= 0:
+            continue
+        reranked.append(
+            {
+                **hit,
+                "score": total_score,
+                "dense_score": dense_score,
+                "bm25_score": bm25_score,
+                "keyword_score": keyword_score,
+            }
+        )
+
+    reranked.sort(key=lambda item: item["score"], reverse=True)
+    return reranked[:limit]
+
+
 def seconds_to_timestamp(seconds: float) -> str:
     total_seconds = max(0, int(seconds))
     minutes = total_seconds // 60

@@ -77,3 +77,20 @@ async def deactivate_skill(
         actor=payload.actor,
     )
     return deactivation.model_dump()
+
+
+@router.get("/api/skills/sessions/{session_id}")
+async def get_session_skills(
+    session_id: str,
+    runtime: Runtime = Depends(get_runtime),
+) -> dict[str, Any]:
+    if runtime.skill_service is None:
+        raise RuntimeError("Skill service is not available.")
+    return {
+        "session_id": session_id,
+        "active_skills": runtime.skill_service.get_active_skills(session_id=session_id),
+        "available_skills_prompt": runtime.skill_service.build_available_skills_prompt(
+            session_id=session_id,
+            actor="agent",
+        ),
+    }

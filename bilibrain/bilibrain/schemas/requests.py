@@ -18,30 +18,22 @@ class AskRequest(BaseModel):
     actor: str = Field(default="agent", min_length=1, max_length=64)
 
 
+class AgentResumeRequest(BaseModel):
+    conversation_id: int | None = Field(default=None, gt=0)
+    session_id: str = Field(..., min_length=1, max_length=128)
+    decision: dict = Field(default_factory=dict)
+    actor: str = Field(default="agent", min_length=1, max_length=64)
+    folder_id: int | None = Field(default=None, gt=0)
+    bvid: str | None = Field(default=None, max_length=32)
+    scope_mode: Literal["video", "folder", "global"] | None = Field(default=None)
+
+
 class ChatConversationCreateRequest(BaseModel):
     title: str | None = Field(default=None, max_length=255)
 
 
 class ChatConversationRenameRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
-
-
-class SkillAgentAskRequest(BaseModel):
-    query: str = Field(..., min_length=2)
-    conversation_id: int | None = Field(default=None, gt=0)
-    session_id: str | None = Field(default=None, min_length=1, max_length=128)
-    approval_mode: ToolApprovalMode = Field(default=ToolApprovalMode.AUTO)
-    actor: str = Field(default="skill-agent", min_length=1, max_length=64)
-
-
-class SkillAgentResumeRequest(BaseModel):
-    conversation_id: int | None = Field(default=None, gt=0)
-    session_id: str = Field(..., min_length=1, max_length=128)
-    decision: dict = Field(default_factory=dict)
-    actor: str = Field(default="skill-agent", min_length=1, max_length=64)
-    folder_id: int | None = Field(default=None, gt=0)
-    bvid: str | None = Field(default=None, max_length=32)
-    scope_mode: Literal["video", "folder", "global"] | None = Field(default=None)
 
 
 class SettingsRequest(BaseModel):
