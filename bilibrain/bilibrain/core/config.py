@@ -68,6 +68,12 @@ class Settings:
     llm_model: str
     planner_llm_model: str
     asr_language: str
+    asr_api_base_url: str
+    asr_api_model: str
+    asr_enable_itn: bool
+    asr_api_timeout_seconds: int
+    asr_api_retries: int
+    asr_api_retry_backoff_millis: int
     asr_chunk_seconds: int
     asr_target_chunk_seconds: int
     asr_chunk_overlap_seconds: float
@@ -142,6 +148,10 @@ class Settings:
     def audio_dir(self) -> Path:
         return self.data_dir / "audio"
 
+    @property
+    def chat_dir(self) -> Path:
+        return self.data_dir / "chat"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
@@ -161,6 +171,15 @@ def get_settings() -> Settings:
         llm_model=os.getenv("LLM_MODEL", "qwen-plus"),
         planner_llm_model=os.getenv("PLANNER_LLM_MODEL", os.getenv("LLM_MODEL", "qwen-plus")).strip(),
         asr_language=os.getenv("ASR_LANGUAGE", "zh").strip(),
+        asr_api_base_url=os.getenv(
+            "ASR_API_BASE_URL",
+            os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        ).rstrip("/"),
+        asr_api_model=os.getenv("ASR_API_MODEL", "qwen3-asr-flash").strip(),
+        asr_enable_itn=_bool("ASR_ENABLE_ITN", False),
+        asr_api_timeout_seconds=_int("ASR_API_TIMEOUT_SECONDS", 90),
+        asr_api_retries=_int("ASR_API_RETRIES", 2),
+        asr_api_retry_backoff_millis=_int("ASR_API_RETRY_BACKOFF_MILLIS", 1000),
         asr_chunk_seconds=_int("ASR_CHUNK_SECONDS", 120),
         asr_target_chunk_seconds=_int("ASR_TARGET_CHUNK_SECONDS", 90),
         asr_chunk_overlap_seconds=_float("ASR_CHUNK_OVERLAP_SECONDS", 1.0),

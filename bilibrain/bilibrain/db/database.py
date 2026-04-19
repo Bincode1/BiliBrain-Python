@@ -4,8 +4,6 @@ import json
 import logging
 from datetime import datetime
 from typing import Any
-from uuid import uuid4
-
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -107,38 +105,6 @@ _TABLE_DDLS = [
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     )""",
-    """CREATE TABLE IF NOT EXISTS chat_conversations (
-        conversation_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        scope_key VARCHAR(128) NOT NULL DEFAULT '',
-        folder_id INTEGER DEFAULT NULL,
-        title VARCHAR(255) DEFAULT NULL,
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )""",
-    """CREATE TABLE IF NOT EXISTS chat_messages (
-        message_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        conversation_id INTEGER NOT NULL,
-        role VARCHAR(16) NOT NULL,
-        content TEXT NOT NULL,
-        sources_json TEXT,
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )""",
-    """CREATE TABLE IF NOT EXISTS chat_conversation_memory (
-        conversation_id INTEGER NOT NULL PRIMARY KEY,
-        memory_text TEXT NOT NULL,
-        compacted_until_message_id INTEGER DEFAULT NULL,
-        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )""",
-    """CREATE TABLE IF NOT EXISTS chat_conversation_context_stats (
-        conversation_id INTEGER NOT NULL PRIMARY KEY,
-        last_message_id INTEGER DEFAULT NULL,
-        compacted_until_message_id INTEGER DEFAULT NULL,
-        recent_start_message_id INTEGER DEFAULT NULL,
-        memory_token_estimate INTEGER NOT NULL DEFAULT 0,
-        uncompacted_token_estimate INTEGER NOT NULL DEFAULT 0,
-        recent_token_estimate INTEGER NOT NULL DEFAULT 0,
-        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )""",
     """CREATE TABLE IF NOT EXISTS tool_workspaces (
         workspace_id VARCHAR(64) NOT NULL PRIMARY KEY,
         scope_key VARCHAR(255) NOT NULL DEFAULT '',
@@ -182,13 +148,17 @@ _INDEX_DDLS = [
     "CREATE INDEX IF NOT EXISTS idx_tasks_status ON ingestion_tasks (status)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_bvid ON ingestion_tasks (bvid)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_batch ON ingestion_tasks (batch_id)",
-    "CREATE INDEX IF NOT EXISTS idx_conv_scope ON chat_conversations (scope_key)",
-    "CREATE INDEX IF NOT EXISTS idx_conv_folder ON chat_conversations (folder_id)",
-    "CREATE INDEX IF NOT EXISTS idx_msg_conversation ON chat_messages (conversation_id)",
     "CREATE INDEX IF NOT EXISTS idx_ws_scope ON tool_workspaces (scope_key)",
     "CREATE INDEX IF NOT EXISTS idx_ws_feature ON tool_workspaces (feature_name)",
     "CREATE INDEX IF NOT EXISTS idx_tc_workspace ON tool_calls (workspace_id)",
 ]
+
+_LEGACY_CHAT_TABLES = (
+    "chat_conversation_context_stats",
+    "chat_conversation_memory",
+    "chat_messages",
+    "chat_conversations",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +180,8 @@ class Database:
         return self._engine
 
     async def ensure_ready(self) -> None:
+        if self._engine is not None:
+            return
         self.settings.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._engine = create_async_engine(
             f"sqlite+aiosqlite:///{self.settings.db_path}?timeout=30",
@@ -222,7 +194,12 @@ class Database:
             await conn.run_sync(self._create_indexes)
             await conn.run_sync(self._ensure_video_columns)
             await conn.run_sync(self._ensure_folder_columns)
-            await conn.run_sync(self._ensure_chat_message_columns)
+
+    async def close(self) -> None:
+        if self._engine is None:
+            return
+        await self._engine.dispose()
+        self._engine = None
 
     def _create_tables(self, conn: Any) -> None:
         for ddl in _TABLE_DDLS:
@@ -255,18 +232,10 @@ class Database:
             except Exception:
                 pass
 
-    def _ensure_chat_message_columns(self, conn: Any) -> None:
-        columns = {
-            "answer_mode": "VARCHAR(32) DEFAULT NULL",
-            "route_mode": "VARCHAR(32) DEFAULT NULL",
-        }
-        for col, col_def in columns.items():
-            try:
-                conn.execute(
-                    text(f"ALTER TABLE chat_messages ADD COLUMN {col} {col_def}")
-                )
-            except Exception:
-                pass
+    async def drop_legacy_chat_tables(self) -> None:
+        async with self.engine.begin() as conn:
+            for table_name in _LEGACY_CHAT_TABLES:
+                await conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
 
     # -- formatting helpers (used by query modules) ------------------------
 
@@ -321,87 +290,6 @@ class Database:
                 }
             )
         return normalize_pipeline_state(state)
-
-    @staticmethod
-    def _conversation_scope_key(folder_id: int | None) -> str:
-        scope_prefix = f"folder:{int(folder_id)}" if folder_id else "all"
-        return f"{scope_prefix}:{uuid4().hex[:16]}"
-
-    @staticmethod
-    def _normalize_chat_title(title: str | None, *, limit: int = 255) -> str | None:
-        if title is None:
-            return None
-        normalized = " ".join(str(title).split()).strip()
-        return normalized[:limit] if normalized else None
-
-    @staticmethod
-    def _build_chat_title(content: str, *, limit: int = 48) -> str:
-        t = " ".join(str(content or "").split())
-        return t if len(t) <= limit else f"{t[: limit - 1].rstrip()}\u2026"
-
-    @staticmethod
-    def _format_chat_conversation(row: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "conversation_id": int(row["conversation_id"]),
-            "scope_key": row["scope_key"],
-            "folder_id": int(row["folder_id"])
-            if row.get("folder_id") is not None
-            else None,
-            "title": row.get("title") or "",
-            "message_count": int(row.get("message_count") or 0),
-            "created_at": _format_datetime(row.get("created_at")),
-            "updated_at": _format_datetime(row.get("updated_at")),
-        }
-
-    @staticmethod
-    def _format_chat_message(row: dict[str, Any]) -> dict[str, Any]:
-        sources_json = row.get("sources_json")
-        try:
-            sources = json.loads(sources_json) if sources_json else []
-        except json.JSONDecodeError:
-            sources = []
-        return {
-            "message_id": int(row["message_id"]),
-            "conversation_id": int(row["conversation_id"]),
-            "role": row["role"],
-            "content": row.get("content") or "",
-            "answer_mode": str(row.get("answer_mode") or "").strip().lower() or None,
-            "route_mode": str(row.get("route_mode") or "").strip().lower() or None,
-            "sources": sources if isinstance(sources, list) else [],
-            "created_at": _format_datetime(row.get("created_at")),
-        }
-
-    @staticmethod
-    def _format_chat_memory(row: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "conversation_id": int(row["conversation_id"]),
-            "memory_text": str(row.get("memory_text") or "").strip(),
-            "compacted_until_message_id": int(row["compacted_until_message_id"])
-            if row.get("compacted_until_message_id")
-            else None,
-            "updated_at": _format_datetime(row.get("updated_at")),
-        }
-
-    @staticmethod
-    def _format_chat_context_stats(row: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "conversation_id": int(row["conversation_id"]),
-            "last_message_id": int(row["last_message_id"])
-            if row.get("last_message_id")
-            else None,
-            "compacted_until_message_id": int(row["compacted_until_message_id"])
-            if row.get("compacted_until_message_id")
-            else None,
-            "recent_start_message_id": int(row["recent_start_message_id"])
-            if row.get("recent_start_message_id")
-            else None,
-            "memory_token_estimate": int(row.get("memory_token_estimate") or 0),
-            "uncompacted_token_estimate": int(
-                row.get("uncompacted_token_estimate") or 0
-            ),
-            "recent_token_estimate": int(row.get("recent_token_estimate") or 0),
-            "updated_at": _format_datetime(row.get("updated_at")),
-        }
 
     @staticmethod
     def _format_ingestion_batch(row: dict[str, Any]) -> dict[str, Any]:
@@ -476,6 +364,8 @@ from bilibrain.db.queries.state import (  # noqa: E402
     get_state_updated_at,
     get_processing_settings,
     save_processing_settings,
+    try_acquire_state_lease,
+    release_state_lease,
 )
 from bilibrain.db.queries.collections import (  # noqa: E402
     save_folders,
@@ -530,26 +420,12 @@ from bilibrain.db.queries.ingestion import (  # noqa: E402
 )
 from bilibrain.db.queries.chat import (  # noqa: E402
     create_tool_workspace,
+    ensure_default_tool_workspace,
     get_tool_workspace_by_scope_key,
     get_tool_workspace,
     list_tool_workspaces,
     log_tool_call,
     list_tool_calls_for_conversation,
-    get_chat_conversation,
-    create_chat_conversation,
-    get_latest_chat_conversation,
-    list_chat_conversations,
-    delete_chat_conversation,
-    rename_chat_conversation,
-    get_chat_conversation_memory,
-    upsert_chat_conversation_memory,
-    get_chat_conversation_context_stats,
-    upsert_chat_conversation_context_stats,
-    list_chat_messages,
-    list_recent_chat_messages_by_turns,
-    list_chat_messages_between,
-    append_chat_message,
-    update_chat_message,
     get_counts,
 )
 from bilibrain.db.queries.skills import (  # noqa: E402
@@ -563,6 +439,8 @@ Database.load_state = load_state  # type: ignore[method-assign]
 Database.get_state_updated_at = get_state_updated_at  # type: ignore[method-assign]
 Database.get_processing_settings = get_processing_settings  # type: ignore[method-assign]
 Database.save_processing_settings = save_processing_settings  # type: ignore[method-assign]
+Database.try_acquire_state_lease = try_acquire_state_lease  # type: ignore[method-assign]
+Database.release_state_lease = release_state_lease  # type: ignore[method-assign]
 Database.save_folders = save_folders  # type: ignore[method-assign]
 Database.get_folders_by_uid = get_folders_by_uid  # type: ignore[method-assign]
 Database.get_folder = get_folder  # type: ignore[method-assign]
@@ -609,26 +487,12 @@ Database.cancel_ingestion_task = cancel_ingestion_task  # type: ignore[method-as
 Database.delete_ingestion_tasks_for_bvid = delete_ingestion_tasks_for_bvid  # type: ignore[method-assign]
 Database.delete_all_ingestion_tasks = delete_all_ingestion_tasks  # type: ignore[method-assign]
 Database.create_tool_workspace = create_tool_workspace  # type: ignore[method-assign]
+Database.ensure_default_tool_workspace = ensure_default_tool_workspace  # type: ignore[method-assign]
 Database.get_tool_workspace_by_scope_key = get_tool_workspace_by_scope_key  # type: ignore[method-assign]
 Database.get_tool_workspace = get_tool_workspace  # type: ignore[method-assign]
 Database.list_tool_workspaces = list_tool_workspaces  # type: ignore[method-assign]
 Database.log_tool_call = log_tool_call  # type: ignore[method-assign]
 Database.list_tool_calls_for_conversation = list_tool_calls_for_conversation  # type: ignore[method-assign]
-Database.get_chat_conversation = get_chat_conversation  # type: ignore[method-assign]
-Database.create_chat_conversation = create_chat_conversation  # type: ignore[method-assign]
-Database.get_latest_chat_conversation = get_latest_chat_conversation  # type: ignore[method-assign]
-Database.list_chat_conversations = list_chat_conversations  # type: ignore[method-assign]
-Database.delete_chat_conversation = delete_chat_conversation  # type: ignore[method-assign]
-Database.rename_chat_conversation = rename_chat_conversation  # type: ignore[method-assign]
-Database.get_chat_conversation_memory = get_chat_conversation_memory  # type: ignore[method-assign]
-Database.upsert_chat_conversation_memory = upsert_chat_conversation_memory  # type: ignore[method-assign]
-Database.get_chat_conversation_context_stats = get_chat_conversation_context_stats  # type: ignore[method-assign]
-Database.upsert_chat_conversation_context_stats = upsert_chat_conversation_context_stats  # type: ignore[method-assign]
-Database.list_chat_messages = list_chat_messages  # type: ignore[method-assign]
-Database.list_recent_chat_messages_by_turns = list_recent_chat_messages_by_turns  # type: ignore[method-assign]
-Database.list_chat_messages_between = list_chat_messages_between  # type: ignore[method-assign]
-Database.append_chat_message = append_chat_message  # type: ignore[method-assign]
-Database.update_chat_message = update_chat_message  # type: ignore[method-assign]
 Database.get_counts = get_counts  # type: ignore[method-assign]
 Database.activate_skill = activate_skill  # type: ignore[method-assign]
 Database.deactivate_skill = deactivate_skill  # type: ignore[method-assign]

@@ -3,6 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from bilibrain.services.chat_storage import (
+    list_chat_session_messages,
+    list_recent_chat_session_messages,
+    read_chat_session_context_stats,
+    read_chat_session_memory,
+    read_chat_session_memory_sections,
+    write_chat_memory_dual_write,
+    write_chat_memory_sections_dual_write,
+    write_context_stats_dual_write,
+)
 from bilibrain.services.common import estimate_text_tokens
 
 if TYPE_CHECKING:
@@ -10,19 +20,136 @@ if TYPE_CHECKING:
 
 
 DEFAULT_RECENT_TURNS = 5
+MEMORY_SECTION_HEADINGS = (
+    ("当前活跃目标", "active_goal"),
+    ("当前活跃知识范围", "active_scope"),
+    ("历史已完成话题", "completed_topic"),
+    ("已确认结论", "confirmed_fact"),
+    ("未解决问题", "open_question"),
+    ("术语与指代", "user_preference"),
+    ("最近推进状态", "recent_progress"),
+)
 
 
 @dataclass
 class ConversationContext:
+    live_prefix_history: list[dict[str, Any]]
     recent_history: list[dict[str, Any]]
     memory_text: str
     compacted_until_message_id: int | None
     recent_start_message_id: int | None
     estimated_tokens: int
     memory_token_estimate: int
-    uncompacted_token_estimate: int
+    live_prefix_token_estimate: int
     recent_token_estimate: int
     last_message_id: int | None
+
+    @property
+    def uncompacted_token_estimate(self) -> int:
+        return self.live_prefix_token_estimate
+
+
+def _normalize_heading(line: str) -> str:
+    return (
+        str(line or "")
+        .strip()
+        .lstrip("#")
+        .lstrip("-")
+        .lstrip("*")
+        .strip()
+        .rstrip("：:")
+        .strip()
+    )
+
+
+def _extract_keywords(content: str) -> list[str]:
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for raw in str(content or "").replace("，", " ").replace("。", " ").split():
+        token = raw.strip(" -:：,.;；、()[]{}<>\"'`")
+        if len(token) < 2 or token in seen:
+            continue
+        seen.add(token)
+        keywords.append(token)
+        if len(keywords) >= 12:
+            break
+    return keywords
+
+
+def build_memory_sections(
+    memory_text: str,
+    *,
+    source_message_start: int | None,
+    source_message_end: int | None,
+) -> list[dict[str, Any]]:
+    normalized_text = str(memory_text or "").strip()
+    if not normalized_text:
+        return []
+
+    heading_to_type = {heading: kind for heading, kind in MEMORY_SECTION_HEADINGS}
+    sections: list[dict[str, Any]] = []
+    current_heading: str | None = None
+    current_lines: list[str] = []
+
+    def flush() -> None:
+        nonlocal current_heading, current_lines
+        if not current_heading:
+            current_lines = []
+            return
+        content = "\n".join(line for line in current_lines if line.strip()).strip()
+        if not content:
+            current_heading = None
+            current_lines = []
+            return
+        section_type = heading_to_type.get(current_heading, "memory_note")
+        sections.append(
+            {
+                "section_id": f"mem-{len(sections) + 1}",
+                "type": section_type,
+                "content": content,
+                "keywords": _extract_keywords(content),
+                "updated_at": None,
+                "source_message_start": source_message_start,
+                "source_message_end": source_message_end,
+            }
+        )
+        current_heading = None
+        current_lines = []
+
+    for raw_line in normalized_text.splitlines():
+        line = str(raw_line or "").rstrip()
+        heading = _normalize_heading(line)
+        if heading in heading_to_type:
+            flush()
+            current_heading = heading
+            continue
+        if current_heading is None:
+            continue
+        current_lines.append(line)
+
+    flush()
+
+    if sections:
+        return sections
+    return [
+        {
+            "section_id": "mem-1",
+            "type": "memory_note",
+            "content": normalized_text,
+            "keywords": _extract_keywords(normalized_text),
+            "updated_at": None,
+            "source_message_start": source_message_start,
+            "source_message_end": source_message_end,
+        }
+    ]
+
+
+async def read_memory_sections(
+    runtime: Runtime,
+    *,
+    conversation_id: int,
+) -> list[dict[str, Any]]:
+    return await read_chat_session_memory_sections(runtime, conversation_id)
 
 
 def estimate_history_tokens(messages: list[dict[str, Any]]) -> int:
@@ -76,7 +203,54 @@ def _message_id(item: dict[str, Any]) -> int:
     return int(item.get("message_id") or 0)
 
 
+def _group_history_by_user_turn(
+    history: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    groups: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+
+    for item in history:
+        role = str(item.get("role") or "").strip().lower()
+        if role == "user" and current:
+            groups.append(current)
+            current = [item]
+            continue
+        current.append(item)
+
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _select_compactable_history(
+    history: list[dict[str, Any]],
+    *,
+    compacted_until_message_id: int | None,
+    recent_start_message_id: int | None,
+) -> list[dict[str, Any]]:
+    if recent_start_message_id is None:
+        return []
+    result: list[dict[str, Any]] = []
+    for group in _group_history_by_user_turn(history):
+        if not group:
+            continue
+        first_message_id = _message_id(group[0])
+        last_message_id = _message_id(group[-1])
+        if (
+            compacted_until_message_id is not None
+            and last_message_id <= int(compacted_until_message_id)
+        ):
+            continue
+        if first_message_id >= int(recent_start_message_id):
+            continue
+        if last_message_id >= int(recent_start_message_id):
+            continue
+        result.extend(group)
+    return result
+
+
 def _build_context_from_stats(
+    live_prefix_history: list[dict[str, Any]],
     recent_history: list[dict[str, Any]],
     memory_row: dict[str, Any] | None,
     stats_row: dict[str, Any],
@@ -85,12 +259,13 @@ def _build_context_from_stats(
     memory_token_estimate = int(
         stats_row.get("memory_token_estimate") or estimate_text_tokens(memory_text)
     )
-    uncompacted_token_estimate = int(stats_row.get("uncompacted_token_estimate") or 0)
+    live_prefix_token_estimate = int(stats_row.get("uncompacted_token_estimate") or 0)
     recent_token_estimate = int(
         stats_row.get("recent_token_estimate")
         or estimate_history_tokens(recent_history)
     )
     return ConversationContext(
+        live_prefix_history=live_prefix_history,
         recent_history=recent_history,
         memory_text=memory_text,
         compacted_until_message_id=int(stats_row["compacted_until_message_id"])
@@ -100,10 +275,10 @@ def _build_context_from_stats(
         if stats_row.get("recent_start_message_id")
         else (_message_id(recent_history[0]) if recent_history else None),
         estimated_tokens=memory_token_estimate
-        + uncompacted_token_estimate
+        + live_prefix_token_estimate
         + recent_token_estimate,
         memory_token_estimate=memory_token_estimate,
-        uncompacted_token_estimate=uncompacted_token_estimate,
+        live_prefix_token_estimate=live_prefix_token_estimate,
         recent_token_estimate=recent_token_estimate,
         last_message_id=int(stats_row["last_message_id"])
         if stats_row.get("last_message_id")
@@ -111,38 +286,81 @@ def _build_context_from_stats(
     )
 
 
+def _derive_context_stats_payload(
+    full_history: list[dict[str, Any]],
+    *,
+    memory_text: str,
+    compacted_until_message_id: int | None,
+    keep_turns: int,
+) -> dict[str, Any]:
+    _, recent_history = split_recent_history(
+        full_history,
+        keep_turns=keep_turns,
+    )
+    recent_start_message_id = (
+        _message_id(recent_history[0]) if recent_history else None
+    )
+    compactable_history = _select_compactable_history(
+        full_history,
+        compacted_until_message_id=int(compacted_until_message_id)
+        if compacted_until_message_id is not None
+        else None,
+        recent_start_message_id=recent_start_message_id,
+    )
+    return {
+        "last_message_id": _message_id(full_history[-1]) if full_history else None,
+        "compacted_until_message_id": int(compacted_until_message_id)
+        if compacted_until_message_id is not None
+        else None,
+        "recent_start_message_id": recent_start_message_id,
+        "memory_token_estimate": estimate_text_tokens(memory_text),
+        "uncompacted_token_estimate": estimate_history_tokens(compactable_history),
+        "recent_token_estimate": estimate_history_tokens(recent_history),
+    }
+
+
+async def _recompute_context_stats(
+    runtime: Runtime,
+    conversation_id: int,
+    *,
+    memory_text_override: str | None = None,
+    compacted_until_message_id_override: int | None = None,
+) -> dict[str, Any]:
+    full_history = await list_chat_session_messages(runtime, conversation_id)
+    memory_row = await read_chat_session_memory(runtime, conversation_id)
+    memory_text = (
+        str(memory_text_override).strip()
+        if memory_text_override is not None
+        else str(memory_row.get("memory_text") or "").strip()
+        if memory_row
+        else ""
+    )
+    compacted_until_message_id = (
+        int(compacted_until_message_id_override)
+        if compacted_until_message_id_override is not None
+        else (
+        int(memory_row["compacted_until_message_id"])
+        if memory_row and memory_row.get("compacted_until_message_id") is not None
+        else None
+        )
+    )
+    payload = _derive_context_stats_payload(
+        full_history,
+        memory_text=memory_text,
+        compacted_until_message_id=compacted_until_message_id,
+        keep_turns=runtime.settings.chat_recent_turns_to_keep,
+    )
+    return await write_context_stats_dual_write(
+        runtime,
+        conversation_id,
+        **payload,
+    )
+
+
 async def _bootstrap_context_stats(
     runtime: Runtime, conversation_id: int
 ) -> dict[str, Any]:
-    full_history = await runtime.db.list_chat_messages(conversation_id)
-    memory_row = await runtime.db.get_chat_conversation_memory(conversation_id)
-    memory_text = str(memory_row.get("memory_text") or "").strip() if memory_row else ""
-    compacted_until_message_id = (
-        memory_row.get("compacted_until_message_id") if memory_row else None
-    )
-    older_history, recent_history = split_recent_history(
-        full_history,
-        keep_turns=runtime.settings.chat_recent_turns_to_keep,
-    )
-    compactable_history = [
-        item
-        for item in older_history
-        if compacted_until_message_id is None
-        or _message_id(item) > int(compacted_until_message_id)
-    ]
-    return await runtime.db.upsert_chat_conversation_context_stats(
-        conversation_id,
-        last_message_id=_message_id(full_history[-1]) if full_history else None,
-        compacted_until_message_id=int(compacted_until_message_id)
-        if compacted_until_message_id
-        else None,
-        recent_start_message_id=_message_id(recent_history[0])
-        if recent_history
-        else None,
-        memory_token_estimate=estimate_text_tokens(memory_text),
-        uncompacted_token_estimate=estimate_history_tokens(compactable_history),
-        recent_token_estimate=estimate_history_tokens(recent_history),
-    )
+    return await _recompute_context_stats(runtime, conversation_id)
 
 
 async def build_conversation_context(
@@ -150,25 +368,79 @@ async def build_conversation_context(
     *,
     conversation_id: int,
 ) -> ConversationContext:
-    stats_row = await runtime.db.get_chat_conversation_context_stats(conversation_id)
-    if not stats_row:
-        stats_row = await _bootstrap_context_stats(runtime, conversation_id)
-    memory_row = await runtime.db.get_chat_conversation_memory(conversation_id)
-    recent_history = await runtime.db.list_recent_chat_messages_by_turns(
+    stats_row = await read_chat_session_context_stats(runtime, conversation_id)
+    memory_row = await read_chat_session_memory(runtime, conversation_id)
+    recent_history = await list_recent_chat_session_messages(
+        runtime,
         conversation_id,
         keep_turns=runtime.settings.chat_recent_turns_to_keep,
     )
-    return _build_context_from_stats(recent_history, memory_row, stats_row)
+    full_history = await list_chat_session_messages(runtime, conversation_id)
+    expected_recent_start_message_id = (
+        _message_id(recent_history[0]) if recent_history else None
+    )
+    expected_last_message_id = _message_id(recent_history[-1]) if recent_history else None
+    expected_compacted_until_message_id = (
+        int(memory_row["compacted_until_message_id"])
+        if memory_row and memory_row.get("compacted_until_message_id") is not None
+        else None
+    )
+    if (
+        not stats_row
+        or (
+            int(stats_row["recent_start_message_id"])
+            if stats_row.get("recent_start_message_id") is not None
+            else None
+        )
+        != expected_recent_start_message_id
+        or (
+            int(stats_row["last_message_id"])
+            if stats_row.get("last_message_id") is not None
+            else None
+        )
+        != expected_last_message_id
+        or (
+            int(stats_row["compacted_until_message_id"])
+            if stats_row.get("compacted_until_message_id") is not None
+            else None
+        )
+        != expected_compacted_until_message_id
+    ):
+        stats_row = await _recompute_context_stats(runtime, conversation_id)
+    live_prefix_history = _select_compactable_history(
+        full_history,
+        compacted_until_message_id=(
+            int(stats_row["compacted_until_message_id"])
+            if stats_row.get("compacted_until_message_id") is not None
+            else None
+        ),
+        recent_start_message_id=(
+            int(stats_row["recent_start_message_id"])
+            if stats_row.get("recent_start_message_id") is not None
+            else None
+        ),
+    )
+    return _build_context_from_stats(
+        live_prefix_history,
+        recent_history,
+        memory_row,
+        stats_row,
+    )
 
 
-def should_compact_context(runtime: Runtime, context: ConversationContext) -> bool:
+def should_compact_context(
+    runtime: Runtime,
+    context: ConversationContext,
+    *,
+    extra_token_budget: int = 0,
+) -> bool:
     if context.recent_start_message_id is None:
         return False
     if context.last_message_id is None:
         return False
-    if context.uncompacted_token_estimate <= 0:
+    if context.live_prefix_token_estimate <= 0:
         return False
-    return context.estimated_tokens >= int(
+    return (context.estimated_tokens + max(int(extra_token_budget), 0)) >= int(
         runtime.settings.chat_compaction_trigger_tokens
     )
 
@@ -182,21 +454,14 @@ async def compact_conversation_context(
     if context.recent_start_message_id is None:
         return context
 
-    compactable_history = await runtime.db.list_chat_messages_between(
-        conversation_id,
-        start_message_id=context.compacted_until_message_id,
-        end_message_id=context.recent_start_message_id,
+    full_history = await list_chat_session_messages(runtime, conversation_id)
+    compactable_history = _select_compactable_history(
+        full_history,
+        compacted_until_message_id=context.compacted_until_message_id,
+        recent_start_message_id=context.recent_start_message_id,
     )
     if not compactable_history:
-        await runtime.db.upsert_chat_conversation_context_stats(
-            conversation_id,
-            last_message_id=context.last_message_id,
-            compacted_until_message_id=context.compacted_until_message_id,
-            recent_start_message_id=context.recent_start_message_id,
-            memory_token_estimate=context.memory_token_estimate,
-            uncompacted_token_estimate=0,
-            recent_token_estimate=context.recent_token_estimate,
-        )
+        await _recompute_context_stats(runtime, conversation_id)
         return await build_conversation_context(
             runtime, conversation_id=conversation_id
         )
@@ -210,25 +475,29 @@ async def compact_conversation_context(
         history_transcript=transcript,
     )
     latest_message_id = max(_message_id(item) for item in compactable_history)
-    await runtime.db.upsert_chat_conversation_memory(
+    await write_chat_memory_dual_write(
+        runtime,
         conversation_id,
         memory_text=memory_text,
         compacted_until_message_id=latest_message_id,
     )
-    recent_history = await runtime.db.list_recent_chat_messages_by_turns(
-        conversation_id,
-        keep_turns=runtime.settings.chat_recent_turns_to_keep,
-    )
-    await runtime.db.upsert_chat_conversation_context_stats(
-        conversation_id,
-        last_message_id=context.last_message_id,
-        compacted_until_message_id=latest_message_id,
-        recent_start_message_id=_message_id(recent_history[0])
-        if recent_history
+    memory_sections = build_memory_sections(
+        memory_text,
+        source_message_start=_message_id(compactable_history[0])
+        if compactable_history
         else None,
-        memory_token_estimate=estimate_text_tokens(memory_text),
-        uncompacted_token_estimate=0,
-        recent_token_estimate=estimate_history_tokens(recent_history),
+        source_message_end=latest_message_id,
+    )
+    await write_chat_memory_sections_dual_write(
+        runtime,
+        conversation_id,
+        sections=memory_sections,
+    )
+    await _recompute_context_stats(
+        runtime,
+        conversation_id,
+        memory_text_override=memory_text,
+        compacted_until_message_id_override=latest_message_id,
     )
     return await build_conversation_context(runtime, conversation_id=conversation_id)
 
@@ -239,52 +508,5 @@ async def refresh_context_stats_after_message(
     conversation_id: int,
     message: dict[str, Any],
 ) -> dict[str, Any]:
-    stats_row = await runtime.db.get_chat_conversation_context_stats(conversation_id)
-    if not stats_row:
-        stats_row = await _bootstrap_context_stats(runtime, conversation_id)
-    memory_row = await runtime.db.get_chat_conversation_memory(conversation_id)
-    compacted_until_message_id = (
-        int(stats_row["compacted_until_message_id"])
-        if stats_row.get("compacted_until_message_id")
-        else int(memory_row["compacted_until_message_id"])
-        if memory_row and memory_row.get("compacted_until_message_id")
-        else None
-    )
-    recent_history = await runtime.db.list_recent_chat_messages_by_turns(
-        conversation_id,
-        keep_turns=runtime.settings.chat_recent_turns_to_keep,
-    )
-    recent_start_message_id = _message_id(recent_history[0]) if recent_history else None
-    moved_tokens = 0
-    old_recent_start = (
-        int(stats_row["recent_start_message_id"])
-        if stats_row.get("recent_start_message_id")
-        else None
-    )
-    if (
-        old_recent_start is not None
-        and recent_start_message_id is not None
-        and recent_start_message_id > old_recent_start
-    ):
-        moved_start_boundary = max(
-            int(compacted_until_message_id or 0), old_recent_start - 1
-        )
-        moved_messages = await runtime.db.list_chat_messages_between(
-            conversation_id,
-            start_message_id=moved_start_boundary,
-            end_message_id=recent_start_message_id,
-        )
-        moved_tokens = estimate_history_tokens(moved_messages)
-
-    memory_text = str(memory_row.get("memory_text") or "").strip() if memory_row else ""
-    updated_stats = await runtime.db.upsert_chat_conversation_context_stats(
-        conversation_id,
-        last_message_id=_message_id(message),
-        compacted_until_message_id=compacted_until_message_id,
-        recent_start_message_id=recent_start_message_id,
-        memory_token_estimate=estimate_text_tokens(memory_text),
-        uncompacted_token_estimate=int(stats_row.get("uncompacted_token_estimate") or 0)
-        + moved_tokens,
-        recent_token_estimate=estimate_history_tokens(recent_history),
-    )
-    return updated_stats
+    _ = message
+    return await _recompute_context_stats(runtime, conversation_id)

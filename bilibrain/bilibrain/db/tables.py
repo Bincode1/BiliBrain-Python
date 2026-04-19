@@ -110,52 +110,6 @@ ingestion_tasks = Table(
     Column("updated_at", DateTime, nullable=False),
 )
 
-chat_conversations = Table(
-    "chat_conversations",
-    metadata,
-    Column("conversation_id", BigInteger, primary_key=True, autoincrement=True),
-    Column("scope_key", String(128), nullable=False),
-    Column("folder_id", BigInteger),
-    Column("title", String(255)),
-    Column("created_at", DateTime, nullable=False),
-    Column("updated_at", DateTime, nullable=False),
-)
-
-chat_messages = Table(
-    "chat_messages",
-    metadata,
-    Column("message_id", BigInteger, primary_key=True, autoincrement=True),
-    Column("conversation_id", BigInteger, nullable=False),
-    Column("role", String(16), nullable=False),
-    Column("content", Text, nullable=False),
-    Column("sources_json", Text),
-    Column("created_at", DateTime, nullable=False),
-    Column("answer_mode", String(32)),
-    Column("route_mode", String(32)),
-)
-
-chat_conversation_memory = Table(
-    "chat_conversation_memory",
-    metadata,
-    Column("conversation_id", BigInteger, primary_key=True),
-    Column("memory_text", Text, nullable=False),
-    Column("compacted_until_message_id", BigInteger),
-    Column("updated_at", DateTime, nullable=False),
-)
-
-chat_conversation_context_stats = Table(
-    "chat_conversation_context_stats",
-    metadata,
-    Column("conversation_id", BigInteger, primary_key=True),
-    Column("last_message_id", BigInteger),
-    Column("compacted_until_message_id", BigInteger),
-    Column("recent_start_message_id", BigInteger),
-    Column("memory_token_estimate", Integer, nullable=False),
-    Column("uncompacted_token_estimate", Integer, nullable=False),
-    Column("recent_token_estimate", Integer, nullable=False),
-    Column("updated_at", DateTime, nullable=False),
-)
-
 tool_workspaces = Table(
     "tool_workspaces",
     metadata,
