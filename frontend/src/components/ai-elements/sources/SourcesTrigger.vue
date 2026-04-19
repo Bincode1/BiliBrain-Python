@@ -16,7 +16,7 @@ const props = defineProps<{
   >
     <slot>
       <p class="font-medium">
-        Used {{ props.count }} sources
+        已使用 {{ props.count }} 个来源
       </p>
       <ChevronDownIcon class="h-4 w-4" />
     </slot>
