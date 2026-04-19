@@ -1,4 +1,4 @@
-"""Unified ReAct Agent — merges QA retrieval and Skill Agent into one agent.
+"""Unified ReAct Agent — merges QA retrieval and skill execution into one agent.
 
 A single LLM with all tools (QA retrieval, workspace, skills). The agent
 decides which tools to use via a ReAct loop — no intent classifier needed.
@@ -13,25 +13,40 @@ import json
 import logging
 from typing import Any, AsyncIterator, Callable
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
+from bilibrain.chat.assembler import assemble_unified_agent_context
 from bilibrain.core.runtime import Runtime
 from bilibrain.graphs.qa.events import make_sse_event
 from bilibrain.graphs.qa.helpers import describe_query_scope
+from bilibrain.services.chat_storage import (
+    append_chat_message_dual_write,
+    ensure_chat_store_session_loaded,
+    replace_chat_message_dual_write,
+)
+from bilibrain.services.context_usage import get_conversation_context_usage
 from bilibrain.services.chat_memory import (
     build_conversation_context,
     compact_conversation_context,
     refresh_context_stats_after_message,
     should_compact_context,
 )
+from bilibrain.services.common import estimate_text_tokens
 from bilibrain.services.citations import normalize_answer_citations
-from bilibrain.services.skill_agent import (
+from bilibrain.services.agent_runtime import (
+    _consume_pending_approval,
     _format_interrupt,
-    build_skill_agent_history,
-    ensure_skill_agent_conversation,
-    ensure_skill_agent_workspace,
+    _persist_pending_approval,
+    _summarize_tool_result_answer,
+    get_default_workspace,
+    get_or_create_conversation,
+)
+from bilibrain.services.runtime_events import (
+    build_persisting_runtime_event_callback,
+    clear_pending_approval_state,
 )
 from bilibrain.services.summary import resolve_query_scope
+from bilibrain.services.workspace_context import select_workspace_context
 from bilibrain.skills import build_skill_langchain_tools
 from bilibrain.tools import build_langchain_tools
 from bilibrain.tools.policy import evaluate_command_request
@@ -53,6 +68,31 @@ def _build_skills_state(runtime: Runtime, session_id: str) -> dict[str, Any]:
         "active_skills": runtime.skill_service.get_active_skills(session_id),
         "loaded_skills": runtime.skill_service.get_loaded_skills(session_id),
     }
+
+
+async def _flush_persisted_event_tasks(tasks: list[asyncio.Task[None]]) -> None:
+    if not tasks:
+        return
+    pending = [task for task in tasks if not task.done()]
+    if pending:
+        await asyncio.gather(*pending)
+
+
+def _build_persisting_event_callback(
+    runtime: Runtime,
+    *,
+    conversation_id: int,
+    workspace_id: str,
+    downstream: Callable[[str, dict[str, Any]], None] | None,
+    tasks: list[asyncio.Task[None]],
+) -> Callable[[str, dict[str, Any]], None]:
+    return build_persisting_runtime_event_callback(
+        runtime,
+        conversation_id=int(conversation_id),
+        workspace_id=str(workspace_id or "default"),
+        downstream=downstream,
+        tasks=tasks,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +225,31 @@ def build_unified_agent_prompt(
             available_skills,
             memory_block,
         ]
+    )
+
+
+async def _estimate_compaction_overhead_tokens(
+    runtime: Runtime,
+    *,
+    session_id: str,
+    workspace_id: str,
+    scope_description: str,
+    query: str,
+    actor: str,
+) -> int:
+    prompt_without_memory = build_unified_agent_prompt(
+        runtime,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        scope_description=scope_description,
+        memory_text="",
+        actor=actor,
+    )
+    workspace_context = await select_workspace_context(runtime, query=query)
+    return (
+        estimate_text_tokens(prompt_without_memory)
+        + workspace_context.token_estimate
+        + estimate_text_tokens(str(query or "").strip())
     )
 
 
@@ -594,12 +659,14 @@ async def _preprocess(
     bvid: str | None,
     scope_mode: str | None,
     conversation_id: int | None,
+    actor: str,
     event_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Resolve scope, load context, compact memory, persist user message."""
     # 1. Ensure conversation
-    conversation = await ensure_skill_agent_conversation(runtime, conversation_id)
+    conversation = await get_or_create_conversation(runtime, conversation_id)
     resolved_conversation_id = int(conversation["conversation_id"])
+    await ensure_chat_store_session_loaded(runtime, resolved_conversation_id)
 
     # 2. Resolve scope
     scope = resolve_query_scope(folder_id=folder_id, bvid=bvid, scope_mode=scope_mode)
@@ -609,14 +676,27 @@ async def _preprocess(
         bvid=scope["bvid"] if scope["scope"] == "video" else bvid,
         scope_mode=scope_mode,
     )
+    session_id = build_unified_session_id(conversation_id=resolved_conversation_id)
+    workspace_id = "default"
+    if runtime.tool_service is not None:
+        workspace = await get_default_workspace(runtime, actor=actor)
+        workspace_id = str(workspace.get("workspace_id") or "default").strip() or "default"
 
     # 3. Load conversation context
     context = await build_conversation_context(
         runtime, conversation_id=resolved_conversation_id,
     )
+    extra_token_budget = await _estimate_compaction_overhead_tokens(
+        runtime,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        scope_description=scope_description,
+        query=query,
+        actor=actor,
+    )
 
     # 4. Compact if needed
-    if should_compact_context(runtime, context):
+    if should_compact_context(runtime, context, extra_token_budget=extra_token_budget):
         context = await compact_conversation_context(
             runtime, conversation_id=resolved_conversation_id, context=context,
         )
@@ -624,22 +704,19 @@ async def _preprocess(
     memory_text = context.memory_text
 
     # 5. Persist user message
-    user_message = await runtime.db.append_chat_message(
+    user_message = await append_chat_message_dual_write(
+        runtime,
         resolved_conversation_id, role="user", content=query,
     )
     await refresh_context_stats_after_message(
         runtime, conversation_id=resolved_conversation_id, message=user_message,
     )
 
-    # 6. Build history
-    history = await build_skill_agent_history(runtime, resolved_conversation_id)
-
     return {
         "conversation_id": resolved_conversation_id,
         "scope": scope,
         "scope_description": scope_description,
         "memory_text": memory_text,
-        "history": history,
     }
 
 
@@ -667,15 +744,18 @@ async def _postprocess(
         )
 
     if placeholder_message_id is not None:
-        assistant_message = await runtime.db.update_chat_message(
-            placeholder_message_id,
+        assistant_message = await replace_chat_message_dual_write(
+            runtime,
+            conversation_id=conversation_id,
+            message_id=placeholder_message_id,
             content=normalized,
             sources=sources,
             answer_mode=answer_mode,
             route_mode=route_mode,
         )
     else:
-        assistant_message = await runtime.db.append_chat_message(
+        assistant_message = await append_chat_message_dual_write(
+            runtime,
             conversation_id,
             "assistant",
             normalized,
@@ -695,26 +775,6 @@ async def _postprocess(
 
 
 # ---------------------------------------------------------------------------
-# Build LangChain message list from history
-# ---------------------------------------------------------------------------
-
-def _build_messages(
-    prompt: str,
-    history: list[tuple[str, str]],
-    query: str,
-) -> list[Any]:
-    """Build the initial message list for the agent loop."""
-    messages: list[Any] = [SystemMessage(content=prompt)]
-    for role, content in history:
-        if role == "human":
-            messages.append(HumanMessage(content=content))
-        else:
-            messages.append(AIMessage(content=content))
-    messages.append(HumanMessage(content=query))
-    return messages
-
-
-# ---------------------------------------------------------------------------
 # Shared helper: build tools + messages for a conversation turn
 # ---------------------------------------------------------------------------
 
@@ -731,8 +791,8 @@ async def _build_turn_context(
     actor: str = "agent",
     event_callback: Callable[[str, dict[str, Any]], None] | None = None,
     collected_sources: list[dict[str, str]] | None = None,
-) -> tuple[list[Any], list[Any]]:
-    """Build messages + tools for one agent turn. Returns (messages, tools)."""
+) -> tuple[Any, list[Any]]:
+    """Build assembled context + tools for one agent turn."""
 
     if collected_sources is None:
         collected_sources = []
@@ -757,20 +817,32 @@ async def _build_turn_context(
     )
     all_tools = [*qa_tools, *skill_tools, *workspace_tools]
 
-    # Build prompt
-    prompt = build_unified_agent_prompt(
+    assembled = await assemble_unified_agent_context(
         runtime,
-        session_id=session_id,
-        workspace_id=workspace_id,
-        scope_description=ctx["scope_description"],
-        memory_text=ctx["memory_text"],
-        actor=actor,
+        conversation_id=int(ctx["conversation_id"]),
+        query=query,
+        system_prompt_builder=lambda memory_text: build_unified_agent_prompt(
+            runtime,
+            session_id=session_id,
+            workspace_id=workspace_id,
+            scope_description=ctx["scope_description"],
+            memory_text=memory_text,
+            actor=actor,
+        ),
     )
+    return assembled, all_tools
 
-    # Build messages
-    messages = _build_messages(prompt, ctx["history"], query)
 
-    return messages, all_tools
+async def _emit_context_usage(
+    runtime: Runtime,
+    *,
+    conversation_id: int,
+    emit: Callable[[str, dict[str, Any] | None], None] | None,
+) -> None:
+    if emit is None:
+        return
+    usage = await get_conversation_context_usage(runtime, conversation_id)
+    emit("context", usage)
 
 
 # ---------------------------------------------------------------------------
@@ -817,102 +889,124 @@ async def _execute_unified_agent_turn(
     event_callback: Callable[[str, dict[str, Any]], None] | None,
 ) -> dict[str, Any]:
     """Run one turn of the unified agent: preprocess → loop → postprocess."""
+    persisted_event_tasks: list[asyncio.Task[None]] = []
     # --- Pre-processing ---
     if event_callback is not None:
         event_callback("status", {"delta": "正在准备会话上下文..."})
 
-    ctx = await _preprocess(
-        runtime,
-        query=query,
-        folder_id=folder_id,
-        bvid=bvid,
-        scope_mode=scope_mode,
-        conversation_id=conversation_id,
-        event_callback=event_callback,
-    )
-    resolved_conversation_id = ctx["conversation_id"]
-    resolved_session_id = build_unified_session_id(
-        conversation_id=resolved_conversation_id,
-        explicit_session_id=session_id,
-    )
+    try:
+        ctx = await _preprocess(
+            runtime,
+            query=query,
+            folder_id=folder_id,
+            bvid=bvid,
+            scope_mode=scope_mode,
+            conversation_id=conversation_id,
+            actor=actor,
+            event_callback=event_callback,
+        )
+        resolved_conversation_id = ctx["conversation_id"]
+        resolved_session_id = build_unified_session_id(
+            conversation_id=resolved_conversation_id,
+            explicit_session_id=session_id,
+        )
+        workspace = await get_default_workspace(runtime, actor=actor)
+        workspace_id = workspace["workspace_id"]
+        persisted_event_callback = _build_persisting_event_callback(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            workspace_id=workspace_id,
+            downstream=event_callback,
+            tasks=persisted_event_tasks,
+        )
 
-    # --- Build workspace ---
-    workspace = await ensure_skill_agent_workspace(
-        runtime, conversation_id=resolved_conversation_id, actor=actor,
-    )
-    workspace_id = workspace["workspace_id"]
-
-    if event_callback is not None:
-        event_callback("status", {"delta": "正在加载工具与技能..."})
-
-    # --- Build tools + messages ---
-    collected_sources: list[dict[str, str]] = []
-    messages, all_tools = await _build_turn_context(
-        runtime,
-        ctx=ctx,
-        query=query,
-        folder_id=folder_id,
-        bvid=bvid,
-        session_id=resolved_session_id,
-        workspace_id=workspace_id,
-        approval_mode=approval_mode,
-        actor=actor,
-        event_callback=event_callback,
-        collected_sources=collected_sources,
-    )
-
-    # --- Run agent loop ---
-    answer_text, approval_request = await _run_agent_loop(
-        runtime,
-        messages=messages,
-        tools=all_tools,
-        session_id=resolved_session_id,
-        actor=actor,
-        event_callback=event_callback,
-    )
-
-    # --- Handle HITL interrupt ---
-    if approval_request is not None:
         if event_callback is not None:
-            event_callback("status", {"delta": "需要人工确认后才能继续。"})
+            event_callback("status", {"delta": "正在加载工具与技能..."})
+
+        collected_sources: list[dict[str, str]] = []
+        assembled, all_tools = await _build_turn_context(
+            runtime,
+            ctx=ctx,
+            query=query,
+            folder_id=folder_id,
+            bvid=bvid,
+            session_id=resolved_session_id,
+            workspace_id=workspace_id,
+            approval_mode=approval_mode,
+            actor=actor,
+            event_callback=persisted_event_callback,
+            collected_sources=collected_sources,
+        )
+        messages = assembled.messages
+
+        answer_text, approval_request = await _run_agent_loop(
+            runtime,
+            messages=messages,
+            tools=all_tools,
+            session_id=resolved_session_id,
+            actor=actor,
+            event_callback=persisted_event_callback,
+        )
+
+        if approval_request is not None:
+            await _persist_pending_approval(
+                runtime,
+                conversation_id=resolved_conversation_id,
+                session_id=resolved_session_id,
+                workspace_id=workspace_id,
+                approval_request=approval_request,
+            )
+            if event_callback is not None:
+                event_callback("status", {"delta": "需要人工确认后才能继续。"})
+            return {
+                "status": "pending_approval",
+                "conversation_id": resolved_conversation_id,
+                "session_id": resolved_session_id,
+                "workspace_id": workspace_id,
+                "approval_request": approval_request,
+                "_pending_messages": messages,
+                "_pending_tools": all_tools,
+                "_pending_sources": collected_sources,
+                **_build_skills_state(runtime, resolved_session_id),
+            }
+
+        await clear_pending_approval_state(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            workspace_id=str(workspace_id or "default"),
+        )
+        if not answer_text:
+            answer_text = "当前没有生成有效回答。"
+
+        if event_callback is not None:
+            event_callback("status", {"delta": "正在保存回答..."})
+
+        post = await _postprocess(
+            runtime,
+            answer_text=answer_text,
+            sources=collected_sources,
+            conversation_id=resolved_conversation_id,
+            route_mode="kb_qa" if collected_sources else "direct",
+        )
+        await _emit_context_usage(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            emit=event_callback,
+        )
+
         return {
-            "status": "pending_approval",
+            "status": "completed",
             "conversation_id": resolved_conversation_id,
             "session_id": resolved_session_id,
             "workspace_id": workspace_id,
-            "approval_request": approval_request,
-            "_pending_messages": messages,  # carry state for resume
-            "_pending_tools": all_tools,
-            "_pending_sources": collected_sources,
+            "answer": post["answer_text"],
+            "answer_mode": post["answer_mode"],
+            "assistant_message": post["assistant_message"],
+            "sources": collected_sources,
             **_build_skills_state(runtime, resolved_session_id),
         }
-
-    # --- Postprocess ---
-    if not answer_text:
-        answer_text = "当前没有生成有效回答。"
-
-    if event_callback is not None:
-        event_callback("status", {"delta": "正在保存回答..."})
-
-    post = await _postprocess(
-        runtime,
-        answer_text=answer_text,
-        sources=collected_sources,
-        conversation_id=resolved_conversation_id,
-        route_mode="kb_qa" if collected_sources else "direct",
-    )
-
-    return {
-        "status": "completed",
-        "conversation_id": resolved_conversation_id,
-        "session_id": resolved_session_id,
-        "workspace_id": workspace_id,
-        "answer": post["answer_text"],
-        "answer_mode": post["answer_mode"],
-        "assistant_message": post["assistant_message"],
-        "sources": collected_sources,
-        **_build_skills_state(runtime, resolved_session_id),
-    }
+    finally:
+        await _flush_persisted_event_tasks(persisted_event_tasks)
 
 
 # ---------------------------------------------------------------------------
@@ -932,8 +1026,9 @@ async def stream_unified_agent_events(
     actor: str = "agent",
 ) -> AsyncIterator[str]:
     """SSE streaming with real token-by-token output via astream()."""
+    persisted_event_tasks: list[asyncio.Task[None]] = []
     # ── Resolve conversation ──────────────────────────────────────────────
-    conversation = await ensure_skill_agent_conversation(runtime, conversation_id)
+    conversation = await get_or_create_conversation(runtime, conversation_id)
     resolved_conversation_id = int(conversation["conversation_id"])
     resolved_session_id = build_unified_session_id(
         conversation_id=resolved_conversation_id,
@@ -965,20 +1060,26 @@ async def stream_unified_agent_events(
             bvid=bvid,
             scope_mode=scope_mode,
             conversation_id=resolved_conversation_id,
+            actor=actor,
         )
 
         # ── Build workspace ───────────────────────────────────────────────
-        workspace = await ensure_skill_agent_workspace(
-            runtime, conversation_id=resolved_conversation_id, actor=actor,
-        )
+        workspace = await get_default_workspace(runtime, actor=actor)
         workspace_id = workspace["workspace_id"]
+        persisted_event_callback = _build_persisting_event_callback(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            workspace_id=workspace_id,
+            downstream=emit_event,
+            tasks=persisted_event_tasks,
+        )
 
         emit_event("status", {"delta": "正在加载工具与技能..."})
 
         # ── Build tools + messages ────────────────────────────────────────
         collected_sources: list[dict[str, str]] = []
 
-        messages, all_tools = await _build_turn_context(
+        assembled, all_tools = await _build_turn_context(
             runtime,
             ctx=ctx,
             query=query,
@@ -988,9 +1089,10 @@ async def stream_unified_agent_events(
             workspace_id=workspace_id,
             approval_mode=approval_mode,
             actor=actor,
-            event_callback=emit_event,
+            event_callback=persisted_event_callback,
             collected_sources=collected_sources,
         )
+        messages = assembled.messages
 
         # ── Run streaming agent loop in background ────────────────────────
         full_answer = ""
@@ -1005,7 +1107,7 @@ async def stream_unified_agent_events(
                     tools=all_tools,
                     session_id=resolved_session_id,
                     actor=actor,
-                    emit_event=emit_event,
+                    emit_event=persisted_event_callback,
                 )
             except Exception as exc:
                 logger.exception("Agent loop failed")
@@ -1041,6 +1143,13 @@ async def stream_unified_agent_events(
 
         # ── HITL interrupt path ───────────────────────────────────────────
         if approval_request is not None:
+            await _persist_pending_approval(
+                runtime,
+                conversation_id=resolved_conversation_id,
+                session_id=resolved_session_id,
+                workspace_id=workspace_id,
+                approval_request=approval_request,
+            )
             yield make_sse_event("approval", {
                 "session_id": resolved_session_id,
                 "workspace_id": workspace_id,
@@ -1051,6 +1160,11 @@ async def stream_unified_agent_events(
             return
 
         # ── Post-processing ───────────────────────────────────────────────
+        await clear_pending_approval_state(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            workspace_id=str(workspace_id or "default"),
+        )
         if full_answer:
             normalized = normalize_answer_citations(full_answer)
             yield make_sse_event("answer_normalized", {"text": normalized})
@@ -1068,6 +1182,10 @@ async def stream_unified_agent_events(
                 sources=collected_sources,
                 conversation_id=resolved_conversation_id,
                 route_mode=route_mode,
+            )
+            yield make_sse_event(
+                "context",
+                await get_conversation_context_usage(runtime, resolved_conversation_id),
             )
 
             if collected_sources:
@@ -1096,6 +1214,8 @@ async def stream_unified_agent_events(
         except Exception:
             pass
         yield make_sse_event("error", {"detail": str(exc) or "Agent 执行失败"})
+    finally:
+        await _flush_persisted_event_tasks(persisted_event_tasks)
 
 
 # ---------------------------------------------------------------------------
@@ -1128,71 +1248,154 @@ async def resume_unified_agent_turn(
     actor: str = "agent",
 ) -> dict[str, Any]:
     """Resume after HITL approval — re-run the loop with the approved tool call injected."""
+    persisted_event_tasks: list[asyncio.Task[None]] = []
     resolved_conversation_id = _resolve_conversation_id(session_id, conversation_id)
 
-    # Rebuild workspace + tools (same as a fresh turn but without prepending user message)
-    conversation = await ensure_skill_agent_conversation(runtime, resolved_conversation_id)
-    resolved_conversation_id = int(conversation["conversation_id"])
-    workspace = await ensure_skill_agent_workspace(
-        runtime, conversation_id=resolved_conversation_id, actor=actor,
-    )
-    workspace_id = workspace["workspace_id"]
+    try:
+        conversation = await get_or_create_conversation(runtime, resolved_conversation_id)
+        resolved_conversation_id = int(conversation["conversation_id"])
+        pending, decision_type, action, effective_args = await _consume_pending_approval(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            session_id=session_id,
+            decision=decision,
+        )
+        workspace = await get_default_workspace(runtime, actor=actor)
+        workspace_id = str(pending.get("workspace_id") or workspace["workspace_id"])
+        persisted_event_callback = _build_persisting_event_callback(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            workspace_id=workspace_id,
+            downstream=None,
+            tasks=persisted_event_tasks,
+        )
 
-    scope = resolve_query_scope(folder_id=folder_id, bvid=bvid, scope_mode=scope_mode)
-    scope_description = await describe_query_scope(
-        runtime,
-        folder_id=scope["folder_id"] if scope["scope"] == "folder" else folder_id,
-        bvid=scope["bvid"] if scope["scope"] == "video" else bvid,
-        scope_mode=scope_mode,
-    )
+        scope = resolve_query_scope(folder_id=folder_id, bvid=bvid, scope_mode=scope_mode)
+        scope_description = await describe_query_scope(
+            runtime,
+            folder_id=scope["folder_id"] if scope["scope"] == "folder" else folder_id,
+            bvid=scope["bvid"] if scope["scope"] == "video" else bvid,
+            scope_mode=scope_mode,
+        )
 
-    collected_sources: list[dict[str, str]] = []
-    qa_tools = build_qa_retrieval_tools(
-        runtime, folder_id=folder_id, bvid=bvid,
-        event_callback=lambda et, d: (
-            collected_sources.extend(d["sources"])
-            if et == "sources" and d.get("sources") else None
-        ),
-    )
-    skill_tools = build_skill_langchain_tools(
-        runtime.skill_service, session_id=session_id, actor=actor,
-    )
-    workspace_tools = build_langchain_tools(
-        runtime.tool_service, workspace_id=workspace_id, actor=actor,
-    )
-    all_tools = [*qa_tools, *skill_tools, *workspace_tools]
-    tool_map, execute = _build_tool_executor(all_tools, runtime=runtime)
+        collected_sources: list[dict[str, str]] = []
 
-    prompt = build_unified_agent_prompt(
-        runtime, session_id=session_id, workspace_id=workspace_id,
-        scope_description=scope_description, memory_text="", actor=actor,
-    )
-    history = await build_skill_agent_history(runtime, resolved_conversation_id)
-    messages = [SystemMessage(content=prompt)]
-    for role, content in history:
-        if role == "human":
-            messages.append(HumanMessage(content=content))
-        else:
-            messages.append(AIMessage(content=content))
+        def qa_cb(event_type: str, data: dict[str, Any]) -> None:
+            if event_type == "sources" and data.get("sources"):
+                collected_sources.extend(data["sources"])
+            persisted_event_callback(event_type, data)
 
-    # Inject the approved tool call
-    approved = decision
-    approved_name = approved.get("name", "")
-    approved_args = approved.get("args", {})
-    approved_id = approved.get("id", f"resume-{approved_name}")
+        qa_tools = build_qa_retrieval_tools(
+            runtime, folder_id=folder_id, bvid=bvid, event_callback=qa_cb,
+        )
+        skill_tools = build_skill_langchain_tools(
+            runtime.skill_service, session_id=session_id, actor=actor,
+            event_callback=persisted_event_callback,
+        )
+        workspace_tools = build_langchain_tools(
+            runtime.tool_service, workspace_id=workspace_id, actor=actor,
+            event_callback=persisted_event_callback,
+        )
+        all_tools = [*qa_tools, *skill_tools, *workspace_tools]
+        _, execute = _build_tool_executor(
+            all_tools, runtime=runtime, event_callback=persisted_event_callback,
+        )
 
-    # Append AIMessage with the approved tool_call
-    messages.append(AIMessage(
-        content="",
-        tool_calls=[{"name": approved_name, "args": approved_args, "id": approved_id}],
-    ))
+        assembled = await assemble_unified_agent_context(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            query="",
+            system_prompt_builder=lambda _memory_text: build_unified_agent_prompt(
+                runtime,
+                session_id=session_id,
+                workspace_id=workspace_id,
+                scope_description=scope_description,
+                memory_text="",
+                actor=actor,
+            ),
+        )
+        messages = list(assembled.messages)
 
-    decision_type = str(decision.get("type") or "").strip().lower()
-    if decision_type == "reject":
-        answer_text = str(decision.get("message") or "用户拒绝了当前操作。").strip()
-        await runtime.db.append_chat_message(
+        approved_name = str(action.get("name") or "")
+        approved_args = effective_args
+        approved_id = str(action.get("id") or f"resume-{approved_name}")
+
+        messages.append(AIMessage(
+            content="",
+            tool_calls=[{"name": approved_name, "args": approved_args, "id": approved_id}],
+        ))
+
+        if decision_type == "reject":
+            answer_text = str(decision.get("message") or "用户拒绝了当前操作。").strip()
+            assistant_message = await append_chat_message_dual_write(
+                runtime,
+                resolved_conversation_id, role="assistant", content=answer_text,
+            )
+            await refresh_context_stats_after_message(
+                runtime, conversation_id=resolved_conversation_id, message=assistant_message,
+            )
+            return {
+                "status": "completed",
+                "conversation_id": resolved_conversation_id,
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+                "answer": answer_text,
+                **_build_skills_state(runtime, session_id),
+            }
+        if approved_name == "skill" and runtime.skill_service is not None:
+            runtime.skill_service.approve_skill(
+                name=str(approved_args.get("name") or ""),
+                session_id=session_id,
+            )
+
+        result_str = await execute(approved_name, approved_args)
+        messages.append(ToolMessage(content=result_str, tool_call_id=approved_id))
+
+        answer_text, next_approval = await _run_agent_loop(
+            runtime,
+            messages=messages,
+            tools=all_tools,
+            session_id=session_id,
+            actor=actor,
+            event_callback=persisted_event_callback,
+        )
+
+        if next_approval is not None:
+            await _persist_pending_approval(
+                runtime,
+                conversation_id=resolved_conversation_id,
+                session_id=session_id,
+                workspace_id=workspace_id,
+                approval_request=next_approval,
+            )
+            return {
+                "status": "pending_approval",
+                "conversation_id": resolved_conversation_id,
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+                "approval_request": next_approval,
+                **_build_skills_state(runtime, session_id),
+            }
+
+        if not answer_text:
+            answer_text = "当前没有生成有效回答。"
+
+        answer_text = normalize_answer_citations(
+            _summarize_tool_result_answer(
+                approved_name,
+                approved_args,
+                result_str,
+                answer_text,
+            )
+        )
+        assistant_message = await append_chat_message_dual_write(
+            runtime,
             resolved_conversation_id, role="assistant", content=answer_text,
         )
+        await refresh_context_stats_after_message(
+            runtime, conversation_id=resolved_conversation_id, message=assistant_message,
+        )
+
         return {
             "status": "completed",
             "conversation_id": resolved_conversation_id,
@@ -1201,51 +1404,8 @@ async def resume_unified_agent_turn(
             "answer": answer_text,
             **_build_skills_state(runtime, session_id),
         }
-    if approved_name == "skill" and runtime.skill_service is not None:
-        runtime.skill_service.approve_skill(
-            name=str(approved_args.get("name") or ""),
-            session_id=session_id,
-        )
-
-    # Execute the approved tool
-    result_str = await execute(approved_name, approved_args)
-    messages.append(ToolMessage(content=result_str, tool_call_id=approved_id))
-
-    # Continue the loop from here
-    answer_text, next_approval = await _run_agent_loop(
-        runtime,
-        messages=messages,
-        tools=all_tools,
-        session_id=session_id,
-        actor=actor,
-    )
-
-    if next_approval is not None:
-        return {
-            "status": "pending_approval",
-            "conversation_id": resolved_conversation_id,
-            "session_id": session_id,
-            "workspace_id": workspace_id,
-            "approval_request": next_approval,
-            **_build_skills_state(runtime, session_id),
-        }
-
-    if not answer_text:
-        answer_text = "当前没有生成有效回答。"
-
-    answer_text = normalize_answer_citations(answer_text)
-    await runtime.db.append_chat_message(
-        resolved_conversation_id, role="assistant", content=answer_text,
-    )
-
-    return {
-        "status": "completed",
-        "conversation_id": resolved_conversation_id,
-        "session_id": session_id,
-        "workspace_id": workspace_id,
-        "answer": answer_text,
-        **_build_skills_state(runtime, session_id),
-    }
+    finally:
+        await _flush_persisted_event_tasks(persisted_event_tasks)
 
 
 async def stream_resume_unified_agent_events(
@@ -1260,6 +1420,7 @@ async def stream_resume_unified_agent_events(
     actor: str = "agent",
 ) -> AsyncIterator[str]:
     """SSE streaming for agent resume — real token-by-token."""
+    persisted_event_tasks: list[asyncio.Task[None]] = []
     normalized_conversation_id = _resolve_conversation_id(session_id, conversation_id)
 
     yield make_sse_event("conversation", {"conversation_id": normalized_conversation_id})
@@ -1279,12 +1440,23 @@ async def stream_resume_unified_agent_events(
     emit_event("status", {"delta": "已接收审批结果，继续执行..."})
 
     # Rebuild context
-    conversation = await ensure_skill_agent_conversation(runtime, normalized_conversation_id)
+    conversation = await get_or_create_conversation(runtime, normalized_conversation_id)
     resolved_conversation_id = int(conversation["conversation_id"])
-    workspace = await ensure_skill_agent_workspace(
-        runtime, conversation_id=resolved_conversation_id, actor=actor,
+    pending, decision_type, action, effective_args = await _consume_pending_approval(
+        runtime,
+        conversation_id=resolved_conversation_id,
+        session_id=session_id,
+        decision=decision,
     )
-    workspace_id = workspace["workspace_id"]
+    workspace = await get_default_workspace(runtime, actor=actor)
+    workspace_id = str(pending.get("workspace_id") or workspace["workspace_id"])
+    persisted_event_callback = _build_persisting_event_callback(
+        runtime,
+        conversation_id=resolved_conversation_id,
+        workspace_id=workspace_id,
+        downstream=emit_event,
+        tasks=persisted_event_tasks,
+    )
 
     scope = resolve_query_scope(folder_id=folder_id, bvid=bvid, scope_mode=scope_mode)
     scope_description = await describe_query_scope(
@@ -1299,49 +1471,60 @@ async def stream_resume_unified_agent_events(
     def qa_cb(et: str, d: dict[str, Any]) -> None:
         if et == "sources" and d.get("sources"):
             collected_sources.extend(d["sources"])
-        emit_event(et, d)
+        persisted_event_callback(et, d)
 
     qa_tools = build_qa_retrieval_tools(runtime, folder_id=folder_id, bvid=bvid, event_callback=qa_cb)
     skill_tools = build_skill_langchain_tools(
-        runtime.skill_service, session_id=session_id, actor=actor, event_callback=emit_event,
+        runtime.skill_service, session_id=session_id, actor=actor, event_callback=persisted_event_callback,
     )
     workspace_tools = build_langchain_tools(
-        runtime.tool_service, workspace_id=workspace_id, actor=actor, event_callback=emit_event,
+        runtime.tool_service, workspace_id=workspace_id, actor=actor, event_callback=persisted_event_callback,
     )
     all_tools = [*qa_tools, *skill_tools, *workspace_tools]
-    _, execute = _build_tool_executor(all_tools, runtime=runtime, event_callback=emit_event)
-
-    prompt = build_unified_agent_prompt(
-        runtime, session_id=session_id, workspace_id=workspace_id,
-        scope_description=scope_description, memory_text="", actor=actor,
+    _, execute = _build_tool_executor(
+        all_tools, runtime=runtime, event_callback=persisted_event_callback,
     )
-    history = await build_skill_agent_history(runtime, resolved_conversation_id)
-    messages = [SystemMessage(content=prompt)]
-    for role, content in history:
-        if role == "human":
-            messages.append(HumanMessage(content=content))
-        else:
-            messages.append(AIMessage(content=content))
+
+    assembled = await assemble_unified_agent_context(
+        runtime,
+        conversation_id=resolved_conversation_id,
+        query="",
+        system_prompt_builder=lambda _memory_text: build_unified_agent_prompt(
+            runtime,
+            session_id=session_id,
+            workspace_id=workspace_id,
+            scope_description=scope_description,
+            memory_text="",
+            actor=actor,
+        ),
+    )
+    messages = list(assembled.messages)
 
     # Inject approved tool call
-    approved = decision
-    approved_name = approved.get("name", "")
-    approved_args = approved.get("args", {})
-    approved_id = approved.get("id", f"resume-{approved_name}")
+    approved_name = str(action.get("name") or "")
+    approved_args = effective_args
+    approved_id = str(action.get("id") or f"resume-{approved_name}")
 
     messages.append(AIMessage(
         content="",
         tool_calls=[{"name": approved_name, "args": approved_args, "id": approved_id}],
     ))
 
-    decision_type = str(decision.get("type") or "").strip().lower()
     if decision_type == "reject":
         full_answer = str(decision.get("message") or "用户拒绝了当前操作。").strip()
-        await runtime.db.append_chat_message(
+        assistant_message = await append_chat_message_dual_write(
+            runtime,
             resolved_conversation_id, role="assistant", content=full_answer,
+        )
+        await refresh_context_stats_after_message(
+            runtime, conversation_id=resolved_conversation_id, message=assistant_message,
         )
         emit_event("status", {"delta": "用户拒绝了当前操作。"})
         yield make_sse_event("answer", {"delta": full_answer})
+        yield make_sse_event(
+            "context",
+            await get_conversation_context_usage(runtime, resolved_conversation_id),
+        )
         yield make_sse_event("skills", _build_skills_state(runtime, session_id))
         yield make_sse_event("done", {})
         return
@@ -1361,14 +1544,14 @@ async def stream_resume_unified_agent_events(
     async def run_loop() -> None:
         nonlocal full_answer, next_approval
         try:
-            full_answer, next_approval = await _stream_agent_loop(
-                runtime,
-                messages=messages,
-                tools=all_tools,
-                session_id=session_id,
-                actor=actor,
-                emit_event=emit_event,
-            )
+                full_answer, next_approval = await _stream_agent_loop(
+                    runtime,
+                    messages=messages,
+                    tools=all_tools,
+                    session_id=session_id,
+                    actor=actor,
+                    emit_event=persisted_event_callback,
+                )
         except Exception as exc:
             logger.exception("Agent resume loop failed")
             emit_event("error", {"detail": str(exc) or "Agent 恢复执行失败"})
@@ -1402,6 +1585,13 @@ async def stream_resume_unified_agent_events(
 
         # ── HITL interrupt ────────────────────────────────────────────────
         if next_approval is not None:
+            await _persist_pending_approval(
+                runtime,
+                conversation_id=resolved_conversation_id,
+                session_id=session_id,
+                workspace_id=workspace_id,
+                approval_request=next_approval,
+            )
             yield make_sse_event("approval", {
                 "session_id": session_id,
                 "workspace_id": workspace_id,
@@ -1415,11 +1605,31 @@ async def stream_resume_unified_agent_events(
         if not full_answer:
             full_answer = "当前没有生成有效回答。"
 
-        normalized = normalize_answer_citations(full_answer)
-        await runtime.db.append_chat_message(
+        normalized = normalize_answer_citations(
+            _summarize_tool_result_answer(
+                approved_name,
+                approved_args,
+                result_str,
+                full_answer,
+            )
+        )
+        assistant_message = await append_chat_message_dual_write(
+            runtime,
             resolved_conversation_id, role="assistant", content=normalized,
         )
+        await refresh_context_stats_after_message(
+            runtime, conversation_id=resolved_conversation_id, message=assistant_message,
+        )
+        await clear_pending_approval_state(
+            runtime,
+            conversation_id=resolved_conversation_id,
+            workspace_id=str(workspace_id or "default"),
+        )
 
+        yield make_sse_event(
+            "context",
+            await get_conversation_context_usage(runtime, resolved_conversation_id),
+        )
         yield make_sse_event("skills", _build_skills_state(runtime, session_id))
         yield make_sse_event("done", {})
 
@@ -1427,9 +1637,12 @@ async def stream_resume_unified_agent_events(
         logger.exception("Unified agent resume streaming failed")
         if full_answer:
             try:
-                await runtime.db.append_chat_message(
+                await append_chat_message_dual_write(
+                    runtime,
                     resolved_conversation_id, role="assistant", content=full_answer,
                 )
             except Exception:
                 pass
         yield make_sse_event("error", {"detail": str(exc) or "Agent 恢复执行失败"})
+    finally:
+        await _flush_persisted_event_tasks(persisted_event_tasks)

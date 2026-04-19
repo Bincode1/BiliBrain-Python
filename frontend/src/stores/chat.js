@@ -17,11 +17,12 @@ const STORAGE_KEY = "bilibrain_workspace_state";
 export const useChatStore = defineStore("chat", () => {
   const chatStatus = createStatus();
   const chatInput = ref("");
-  const skillAgentPendingApproval = ref(null);
+  const agentPendingApproval = ref(null);
   const chatScopeMode = ref(SCOPE_FOLDER);
   const chatScopeFolderId = ref("");
   const chatScopeVideoBvid = ref("");
   const activeConversationId = ref(null);
+  const chatContextUsage = ref({ conversationId: null, currentTokens: 0, limitTokens: 50000 });
   const chatConversations = ref([]);
   const chatMessages = ref([]);
   const chatHistoryLoading = ref(false);
@@ -178,7 +179,7 @@ export const useChatStore = defineStore("chat", () => {
     activeConversationId.value = null;
     chatConversations.value = [];
     chatMessages.value = [];
-    skillAgentPendingApproval.value = null;
+    agentPendingApproval.value = null;
   }
 
   function syncActiveConversationId(conversations, preferredConversationId = null, fallbackActiveConversationId = null) {
@@ -190,6 +191,27 @@ export const useChatStore = defineStore("chat", () => {
   function pushAgentActivity(message, field, item) {
     if (!Array.isArray(message[field])) message[field] = [];
     message[field].push({ ...item, _id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}` });
+  }
+
+  function normalizePendingApproval(payload, conversationId = null) {
+    if (!payload || !payload.approval_request) return null;
+    const resolvedConversationId = Number(payload.conversation_id || conversationId || activeConversationId.value || 0) || null;
+    return {
+      conversationId: resolvedConversationId,
+      sessionId: payload.session_id || (resolvedConversationId ? `conversation-${resolvedConversationId}` : ""),
+      workspaceId: payload.workspace_id || "",
+      approvalRequest: payload.approval_request || null,
+      updatedAt: payload.updated_at || "",
+    };
+  }
+
+  function normalizeContextUsage(payload, conversationId = null) {
+    const resolvedConversationId = Number(payload?.conversation_id || payload?.conversationId || conversationId || activeConversationId.value || 0) || null;
+    return {
+      conversationId: resolvedConversationId,
+      currentTokens: Math.max(Number(payload?.current_tokens || payload?.currentTokens || 0), 0),
+      limitTokens: Math.max(Number(payload?.limit_tokens || payload?.limitTokens || chatContextUsage.value.limitTokens || 50000), 0),
+    };
   }
 
   // --- Conversations ---
@@ -207,8 +229,12 @@ export const useChatStore = defineStore("chat", () => {
       chatMessages.value = Array.isArray(data.messages)
         ? data.messages.map((message) => normalizeChatMessage(message, activeConversationId.value))
         : [];
+      agentPendingApproval.value = normalizePendingApproval(data.pending_approval, activeConversationId.value);
+      chatContextUsage.value = normalizeContextUsage(data.context_usage, activeConversationId.value);
     } catch (error) {
       chatMessages.value = [];
+      agentPendingApproval.value = null;
+      chatContextUsage.value = normalizeContextUsage(null, activeConversationId.value);
       setStatus(chatStatus, error.message, true);
     } finally {
       if (showLoading) chatHistoryLoading.value = false;
@@ -346,6 +372,7 @@ export const useChatStore = defineStore("chat", () => {
         const { event, data } = parseSseEvent(frame);
         if (event === "conversation") {
           activeConversationId.value = data.conversation_id || null;
+          chatContextUsage.value = normalizeContextUsage(chatContextUsage.value, activeConversationId.value);
         } else if (event === "route") {
           assistantMessage.route_mode = data.route_mode || null;
         } else if (event === "mode") {
@@ -354,7 +381,7 @@ export const useChatStore = defineStore("chat", () => {
           assistantMessage.agent_status = data.delta || "";
           scrollChatToBottom();
         } else if (event === "answer") {
-          skillAgentPendingApproval.value = null;
+          agentPendingApproval.value = null;
           if (!answerStarted) { assistantMessage.text = data.delta || ""; answerStarted = true; }
           else { assistantMessage.text += data.delta || ""; }
           scrollChatToBottom();
@@ -369,8 +396,10 @@ export const useChatStore = defineStore("chat", () => {
         } else if (event === "skills") {
           assistantMessage.active_skills = Array.isArray(data.active_skills) ? data.active_skills : [];
           assistantMessage.loaded_skills = Array.isArray(data.loaded_skills) ? data.loaded_skills : [];
+        } else if (event === "context") {
+          chatContextUsage.value = normalizeContextUsage(data, activeConversationId.value);
         } else if (event === "approval") {
-          skillAgentPendingApproval.value = {
+          agentPendingApproval.value = {
             conversationId: activeConversationId.value || null,
             sessionId: data.session_id || `conversation-${activeConversationId.value || ""}`,
             workspaceId: data.workspace_id || "",
@@ -425,7 +454,7 @@ export const useChatStore = defineStore("chat", () => {
     chatMessages.value.push(normalizeChatMessage({ role: "user", text: query }, activeConversationId.value));
     chatMessages.value.push(assistantMessage);
     if (text == null) chatInput.value = "";
-    skillAgentPendingApproval.value = null;
+    agentPendingApproval.value = null;
     scrollChatToBottom();
 
     try {
@@ -451,8 +480,8 @@ export const useChatStore = defineStore("chat", () => {
     }
   }
 
-  async function resumeSkillAgentApproval(decision) {
-    if (!skillAgentPendingApproval.value?.sessionId) {
+  async function resumeAgentApproval(decision) {
+    if (!agentPendingApproval.value?.sessionId) {
       setStatus(chatStatus, "当前没有待审批的操作。", true);
       return;
     }
@@ -473,19 +502,19 @@ export const useChatStore = defineStore("chat", () => {
     assistantMessage._streaming = true;
     chatMessages.value.push(assistantMessage);
     try {
-      const response = await fetch("/api/skill-agent/resume/stream", {
+      const response = await fetch("/api/agent/resume/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          conversation_id: skillAgentPendingApproval.value.conversationId,
-          session_id: skillAgentPendingApproval.value.sessionId,
+          conversation_id: agentPendingApproval.value.conversationId,
+          session_id: agentPendingApproval.value.sessionId,
           decision,
           folder_id: scopeFolderId,
           bvid: scopeBvid,
           scope_mode: chatScopeMode.value,
         }),
       });
-      skillAgentPendingApproval.value = null;
+      agentPendingApproval.value = null;
       await consumeUnifiedStream(response, assistantMessage);
     } catch (error) {
       assistantMessage.text = error.message;
@@ -497,11 +526,12 @@ export const useChatStore = defineStore("chat", () => {
   return {
     chatStatus,
     chatInput,
-    skillAgentPendingApproval,
+    agentPendingApproval,
     chatScopeMode,
     chatScopeFolderId,
     chatScopeVideoBvid,
     activeConversationId,
+    chatContextUsage,
     chatConversations,
     chatMessages,
     chatHistoryLoading,
@@ -532,6 +562,6 @@ export const useChatStore = defineStore("chat", () => {
     deleteConversation,
     renameConversation,
     askQuestion,
-    resumeSkillAgentApproval,
+    resumeAgentApproval,
   };
 });

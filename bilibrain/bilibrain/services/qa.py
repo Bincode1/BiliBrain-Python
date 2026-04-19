@@ -3,13 +3,23 @@ from __future__ import annotations
 from typing import Any
 
 from bilibrain.core.runtime import Runtime
+from bilibrain.services.context_usage import get_conversation_context_usage
+from bilibrain.services.chat_storage import (
+    create_chat_session_dual_write,
+    delete_chat_session_dual_write,
+    ensure_all_chat_store_sessions_loaded,
+    ensure_chat_store_session_loaded,
+    list_chat_session_tool_events,
+    read_chat_session_pending_approval,
+    rename_chat_session_dual_write,
+)
 
 
 async def create_chat_conversation(
     runtime: Runtime,
     title: str | None = None,
 ) -> dict[str, Any]:
-    conversation = await runtime.db.create_chat_conversation(None, title=title)
+    conversation = await create_chat_session_dual_write(runtime, folder_id=None, title=title)
     return {
         "conversation": conversation,
         "messages": [],
@@ -19,12 +29,12 @@ async def create_chat_conversation(
 async def delete_chat_conversation(
     runtime: Runtime, conversation_id: int
 ) -> dict[str, Any]:
-    conversation = await runtime.db.get_chat_conversation(int(conversation_id))
+    conversation = await _get_chat_conversation(runtime, int(conversation_id))
     if not conversation:
         raise RuntimeError("对话会话不存在，请刷新页面后重试。")
 
-    await runtime.db.delete_chat_conversation(int(conversation_id))
-    conversations = await runtime.db.list_chat_conversations(None, all_scopes=True)
+    await delete_chat_session_dual_write(runtime, int(conversation_id))
+    conversations = await _list_chat_conversations(runtime)
     next_active_id = conversations[0]["conversation_id"] if conversations else None
     return {
         "deleted_conversation_id": int(conversation_id),
@@ -38,12 +48,10 @@ async def rename_chat_conversation(
     conversation_id: int,
     title: str,
 ) -> dict[str, Any]:
-    conversation = await runtime.db.rename_chat_conversation(
-        int(conversation_id), title
-    )
+    conversation = await rename_chat_session_dual_write(runtime, int(conversation_id), title)
     if not conversation:
         raise RuntimeError("对话会话不存在，请刷新页面后重试。")
-    conversations = await runtime.db.list_chat_conversations(None, all_scopes=True)
+    conversations = await _list_chat_conversations(runtime)
     return {
         "conversation": conversation,
         "conversations": conversations,
@@ -55,9 +63,8 @@ async def get_chat_history(
     conversation_id: int | None = None,
 ) -> dict[str, Any]:
     if conversation_id is None:
-        conversation = await runtime.db.get_latest_chat_conversation(
-            None, all_scopes=True
-        )
+        conversations = await _list_chat_conversations(runtime)
+        conversation = conversations[0] if conversations else None
         if not conversation:
             return {
                 "conversation_id": None,
@@ -67,19 +74,17 @@ async def get_chat_history(
                 "tool_events": [],
             }
     else:
-        conversation = await runtime.db.get_chat_conversation(int(conversation_id))
+        conversation = await _get_chat_conversation(runtime, int(conversation_id))
         if not conversation:
             raise RuntimeError("对话会话不存在，请刷新页面后重试。")
 
     resolved_id = conversation["conversation_id"]
-    messages = await runtime.db.list_chat_messages(resolved_id)
+    messages = await _list_chat_messages(runtime, resolved_id)
+    pending_approval = await read_chat_session_pending_approval(runtime, resolved_id)
 
-    # Load persisted tool calls and attach to their preceding assistant message
-    tool_calls = await runtime.db.list_tool_calls_for_conversation(resolved_id)
-    if tool_calls:
-        # Build a list of (message_index, tool_events) by matching tool call
-        # started_at to the nearest preceding assistant message.
-        _attach_tool_events_to_messages(messages, tool_calls)
+    tool_events = await list_chat_session_tool_events(runtime, resolved_id)
+    if tool_events:
+        _attach_persisted_events_to_messages(messages, tool_events)
 
     if runtime.skill_service is not None:
         session_id = f"conversation-{resolved_id}"
@@ -92,28 +97,37 @@ async def get_chat_history(
         "folder_id": conversation.get("folder_id"),
         "title": conversation.get("title") or "",
         "messages": messages,
+        "pending_approval": pending_approval,
+        "context_usage": await get_conversation_context_usage(runtime, resolved_id),
     }
 
 
-def _attach_tool_events_to_messages(
+def _attach_persisted_events_to_messages(
     messages: list[dict[str, Any]],
-    tool_calls: list[dict[str, Any]],
+    events: list[dict[str, Any]],
 ) -> None:
-    """Attach tool_calls as tool_events on the nearest preceding assistant message."""
-    if not tool_calls or not messages:
+    if not events or not messages:
         return
 
-    # Build lightweight summary for each tool call, matching the shape
-    # emitted during SSE streaming so the frontend can render them identically.
-    for tc in tool_calls:
-        summary = _summarize_tool_call(tc)
-        # Find the nearest assistant message whose created_at <= tc.started_at
-        target_idx = _find_preceding_assistant_index(messages, tc.get("started_at"))
-        if target_idx is not None:
-            msg = messages[target_idx]
-            if "tool_events" not in msg or not isinstance(msg.get("tool_events"), list):
-                msg["tool_events"] = []
-            msg["tool_events"].append(summary)
+    for event in events:
+        event_type = str(event.get("event_type") or "").strip().lower()
+        if event_type not in {"tool", "skill"}:
+            continue
+        target_idx = _find_following_assistant_index(messages, event.get("created_at"))
+        if target_idx is None:
+            target_idx = _find_preceding_assistant_index(messages, event.get("created_at"))
+        if target_idx is None:
+            continue
+        msg = messages[target_idx]
+        field_name = "tool_events" if event_type == "tool" else "skill_events"
+        if field_name not in msg or not isinstance(msg.get(field_name), list):
+            msg[field_name] = []
+        summary = {
+            key: value
+            for key, value in event.items()
+            if key not in {"event_type"}
+        }
+        msg[field_name].append(summary)
 
 
 def _find_preceding_assistant_index(
@@ -142,41 +156,18 @@ def _find_preceding_assistant_index(
     return best
 
 
-def _summarize_tool_call(tc: dict[str, Any]) -> dict[str, Any]:
-    """Build a tool event summary from a tool_call row, matching SSE shape."""
-    args = tc.get("arguments") or {}
-    result = tc.get("result")
-    name = tc.get("tool_name") or ""
-    ok = tc.get("status") == "finished"
-    error = tc.get("error")
-
-    summary: dict[str, Any] = {"name": name}
-
-    # Summarize args per tool (mirrors langchain_tools._summarize_tool_args)
-    if name == "run_command":
-        summary["command"] = str(args.get("command") or "")
-        summary["cwd"] = str(args.get("cwd") or ".")
-    elif name == "web_search":
-        summary["query"] = str(args.get("query") or "")
-    elif name in ("write_file", "append_file"):
-        content = str(args.get("content") or "")
-        summary["path"] = str(args.get("path") or "")
-        summary["content_length"] = len(content)
-    elif name == "make_dir":
-        summary["path"] = str(args.get("path") or "")
-    elif name in ("read_file", "list_dir"):
-        summary["path"] = str(args.get("path") or ".")
-    elif name in ("search_knowledge_base", "search_video_summaries"):
-        summary["query"] = str(args.get("query") or "")
-
-    if result is not None:
-        summary["ok"] = ok
-    if error:
-        summary["error"] = str(error)
-    summary["duration_ms"] = tc.get("duration_ms", 0)
-    summary["phase"] = "finish" if tc.get("status") in ("finished", "failed") else "start"
-
-    return summary
+def _find_following_assistant_index(
+    messages: list[dict[str, Any]], started_at: str | None
+) -> int | None:
+    if not started_at:
+        return None
+    for index, msg in enumerate(messages):
+        if msg.get("role") != "assistant":
+            continue
+        msg_time = msg.get("created_at") or ""
+        if msg_time and msg_time >= started_at:
+            return index
+    return None
 
 
 def _attach_loaded_skills_to_messages(
@@ -195,10 +186,32 @@ def _attach_loaded_skills_to_messages(
 
 
 async def list_chat_conversations(runtime: Runtime) -> dict[str, Any]:
-    conversations = await runtime.db.list_chat_conversations(None, all_scopes=True)
+    conversations = await _list_chat_conversations(runtime)
     latest = conversations[0]["conversation_id"] if conversations else None
     return {
         "folder_id": None,
         "active_conversation_id": latest,
         "conversations": conversations,
     }
+
+
+async def _list_chat_conversations(runtime: Runtime) -> list[dict[str, Any]]:
+    chat_store = runtime.require_chat_store() if hasattr(runtime, "require_chat_store") else runtime.chat_store
+    await ensure_all_chat_store_sessions_loaded(runtime)
+    return await chat_store.list_sessions()
+
+
+async def _get_chat_conversation(
+    runtime: Runtime, conversation_id: int
+) -> dict[str, Any] | None:
+    chat_store = runtime.require_chat_store() if hasattr(runtime, "require_chat_store") else runtime.chat_store
+    await ensure_chat_store_session_loaded(runtime, int(conversation_id))
+    return await chat_store.get_session(int(conversation_id))
+
+
+async def _list_chat_messages(
+    runtime: Runtime, conversation_id: int
+) -> list[dict[str, Any]]:
+    chat_store = runtime.require_chat_store() if hasattr(runtime, "require_chat_store") else runtime.chat_store
+    await ensure_chat_store_session_loaded(runtime, int(conversation_id))
+    return await chat_store.list_messages(int(conversation_id))
