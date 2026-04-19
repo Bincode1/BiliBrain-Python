@@ -9,15 +9,10 @@ from bilibrain.services.ingestion_dispatcher import build_worker_id, run_ingesti
 
 async def worker_loop(*, poll_interval: float, max_concurrency: int, stale_after_seconds: int) -> None:
     runtime = create_runtime()
-    await startup_runtime(runtime)
+    await startup_runtime(runtime, start_dispatcher=False)
     worker_id = build_worker_id("worker")
 
     try:
-        if runtime.ingestion_dispatcher_task is not None:
-            runtime.ingestion_dispatcher_task.cancel()
-            await asyncio.gather(runtime.ingestion_dispatcher_task, return_exceptions=True)
-            runtime.ingestion_dispatcher_task = None
-
         await run_ingestion_dispatcher(
             runtime,
             worker_id=worker_id,

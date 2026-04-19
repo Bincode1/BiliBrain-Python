@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_qwq import ChatQwen
-
 from bilibrain.ai.schemas import QueryPlan
 from bilibrain.core.config import Settings
 from bilibrain.services.common import seconds_to_timestamp
@@ -17,7 +15,8 @@ class QwenClient:
     MEMORY_SYSTEM_PROMPT = (
         "你是 BiliBrain 的会话记忆整理助手。"
         "你要维护的是后续对话可复用的会话状态，不是知识内容全文总结。"
-        "只能依据已有记忆和新增会话片段更新长期记忆，不要补充对话里没有的信息。"
+        "你只能依据已有记忆和新增会话片段更新长期记忆，禁止补充对话里没有的信息。"
+        "你的输出会直接作为后续压缩记忆使用，所以必须优先保留当前任务状态、已经产出的有效结论、用户明确纠正过的约束，以及仍未解决的问题。"
     )
     MAX_HISTORY_MESSAGES = 10
     MAX_PLANNER_HISTORY_MESSAGES = 6
@@ -26,6 +25,10 @@ class QwenClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.MAX_HISTORY_MESSAGES = max(int(settings.chat_recent_turns_to_keep or 5) * 2, 2)
+        try:
+            from langchain_qwq import ChatQwen
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("langchain_qwq is not installed") from exc
         self.model = ChatQwen(
             model=settings.llm_model,
             api_key=settings.dashscope_api_key,
@@ -319,16 +322,17 @@ class QwenClient:
                         "任务：请把已有会话记忆和新增旧消息片段合并，输出一份更新后的长期会话记忆。",
                         "要求：",
                         "1. 只依据给定内容，不要补充会话里没有的信息。",
-                        "2. 你的任务是保留会话状态和推进脉络，不要把知识库内容重新展开成详细讲义。",
-                        "3. 保留长期有价值的信息，删除寒暄、重复问答和低价值措辞。",
-                        "4. 当前仍在推进的话题，放在“当前活跃目标 / 当前活跃知识范围”。已经闭环的话题，降级放到“历史已完成话题”，每个旧话题最多一句。",
-                        "5. 不要重复。相同信息只保留在最合适的一个小节里，不要同时出现在“已确认结论”和“最近推进状态”里。",
-                        "6. 已确认结论只保留后续还可能被引用的关键结论，不要罗列大量细节事实。",
-                        "7. 如果某些结论只是当时基于资料的暂时判断，不要写成绝对事实。",
-                        "8. 术语与指代只保留后续可能继续追问的映射，不要做通用概念百科。",
-                        "9. 默认尽量控制篇幅，宁可高密度概括，也不要冗长重复。",
-                        "10. 输出结构固定为：当前活跃目标、当前活跃知识范围、历史已完成话题、已确认结论、未解决问题、术语与指代、最近推进状态。",
-                        "11. 回答用中文，结构清晰，使用精炼要点。",
+                        "2. 你的任务是保留会话状态、用户目标、已确认结果和推进脉络，不要把知识库内容重新展开成详细讲义。",
+                        "3. 优先保留已经在对话中真正产出的结论、方案、回答结果和用户确认过的约束；不要只复述问题本身。",
+                        "4. 只有当片段里确实没有答案、没有结果、没有完成动作时，才把事项写进“未解决问题”；如果助手已经给出可复用结果，就优先沉淀到“已确认结论 / 最近推进状态”。",
+                        "5. 当前仍在推进的话题，放在“当前活跃目标 / 当前活跃知识范围”。已经闭环的话题，降级放到“历史已完成话题”，每个旧话题最多一句。",
+                        "6. 不要重复。相同信息只保留在最合适的一个小节里，不要同时出现在“已确认结论”和“最近推进状态”里。",
+                        "7. 已确认结论只保留后续还可能被引用的关键结论、工程动作、用户偏好或有效答案，不要罗列大量细节事实。",
+                        "8. 如果某些结论只是当时基于资料的暂时判断，要明确其语气，不要写成绝对事实。",
+                        "9. 术语与指代只保留后续可能继续追问的映射，不要做通用概念百科。",
+                        "10. 默认尽量控制篇幅，宁可高密度概括，也不要冗长重复。",
+                        "11. 输出结构固定为：当前活跃目标、当前活跃知识范围、历史已完成话题、已确认结论、未解决问题、术语与指代、最近推进状态。",
+                        "12. 回答用中文，结构清晰，使用精炼要点。",
                         "",
                         "已有会话记忆：",
                         str(existing_memory_text or "").strip() or "（暂无已有记忆）",

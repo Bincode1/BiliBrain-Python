@@ -149,7 +149,7 @@ async def ensure_transcript_data(state: IngestionState) -> IngestionState:
         bvid,
         "transcript",
         "running",
-        source_model=runtime.settings.whisper_model,
+        source_model=runtime.asr.model_label(),
         segment_count=0,
         substage="chunking",
         substage_label="正在分析静音并切分音频",
@@ -158,13 +158,13 @@ async def ensure_transcript_data(state: IngestionState) -> IngestionState:
 
     async def _handle_progress(event: dict[str, object]) -> None:
         await runtime.db.update_pipeline_step(
-            bvid,
-            "transcript",
-            "running",
-            source_model=runtime.settings.whisper_model,
-            segment_count=0,
-            substage=str(event.get("stage") or "").strip() or None,
-            substage_label=str(event.get("message") or "").strip(),
+        bvid,
+        "transcript",
+        "running",
+        source_model=runtime.asr.model_label(),
+        segment_count=0,
+        substage=str(event.get("stage") or "").strip() or None,
+        substage_label=str(event.get("message") or "").strip(),
         )
 
     transcript_payload = await runtime.asr.transcribe_audio_file(
@@ -293,7 +293,7 @@ async def upsert_index_chunks(state: IngestionState) -> IngestionState:
         up_name=video.get("up_name"),
         transcript_source=str(
             (await runtime.db.get_transcript(bvid) or {}).get("source_model")
-            or runtime.settings.whisper_model
+            or runtime.asr.model_label()
         ),
         manual_tags=video.get("manual_tags") or [],
         chunks=chunk_rows,
@@ -303,7 +303,7 @@ async def upsert_index_chunks(state: IngestionState) -> IngestionState:
         cid=int(video["cid"]) if video.get("cid") else None,
         transcript_source=str(
             (await runtime.db.get_transcript(bvid) or {}).get("source_model")
-            or runtime.settings.whisper_model
+            or runtime.asr.model_label()
         ),
         audio_storage_provider=video.get("audio_storage_provider"),
         audio_object_key=video.get("audio_object_key"),

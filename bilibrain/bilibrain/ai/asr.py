@@ -15,6 +15,7 @@ from bilibrain.ai.audio_chunking import (
     plan_silence_aligned_ranges,
     trim_repeated_prefix,
 )
+from bilibrain.ai.qwen_asr import QwenAsrClient
 from bilibrain.core.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -23,49 +24,13 @@ logger = logging.getLogger(__name__)
 class WhisperAsrClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._model = None
-
-    def _get_model(self):
-        if self._model is None:
-            from faster_whisper import WhisperModel
-
-            device = self.settings.whisper_device
-            compute_type = self.settings.whisper_compute_type
-
-            if device == "cuda":
-                try:
-                    self._model = WhisperModel(
-                        self.settings.whisper_model,
-                        device="cuda",
-                        compute_type=compute_type,
-                    )
-                    logger.info(
-                        "Loaded faster-whisper model: %s on CUDA (compute_type=%s)",
-                        self.settings.whisper_model,
-                        compute_type,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "CUDA unavailable (%s), falling back to CPU", exc
-                    )
-                    device = "cpu"
-                    compute_type = "int8"
-
-            if device == "cpu":
-                self._model = WhisperModel(
-                    self.settings.whisper_model,
-                    device="cpu",
-                    compute_type="int8",
-                )
-                logger.info(
-                    "Loaded faster-whisper model: %s on CPU (compute_type=int8)",
-                    self.settings.whisper_model,
-                )
-        return self._model
+        self._client = QwenAsrClient(settings)
 
     def ensure_configured(self) -> None:
-        if not self.settings.whisper_model:
-            raise RuntimeError("WHISPER_MODEL not set")
+        self._client.ensure_configured()
+
+    def model_label(self) -> str:
+        return self._client.model_label()
 
     async def transcribe_audio_file(self, audio_path: Path, *, on_progress=None) -> dict[str, Any]:
         self.ensure_configured()
@@ -134,7 +99,7 @@ class WhisperAsrClient:
             total_elapsed,
         )
         return {
-            "model": f"faster-whisper/{self.settings.whisper_model}",
+            "model": self._client.model_label(),
             "chunk_target_seconds": self.settings.asr_target_chunk_seconds,
             "chunk_max_seconds": self.settings.asr_chunk_seconds,
             "chunk_overlap_seconds": self.settings.asr_chunk_overlap_seconds,
@@ -165,7 +130,7 @@ class WhisperAsrClient:
                     len(chunk_specs),
                     chunk_spec["path"].name,
                 )
-                text = (await asyncio.to_thread(self._transcribe_file_sync, chunk_spec["path"])).strip()
+                text = (await self._transcribe_file(chunk_spec["path"])).strip()
                 chunk_elapsed = perf_counter() - chunk_started
                 logger.info(
                     "ASR chunk completed for %s: %s/%s in %.2fs",
@@ -198,16 +163,8 @@ class WhisperAsrClient:
                 await asyncio.gather(*tasks, return_exceptions=True)
         return results
 
-    def _transcribe_file_sync(self, audio_path: Path) -> str:
-        model = self._get_model()
-        segments_iter, info = model.transcribe(
-            str(audio_path),
-            language=self.settings.asr_language or "zh",
-            beam_size=5,
-            vad_filter=True,
-        )
-        texts = [segment.text for segment in segments_iter]
-        return " ".join(texts)
+    async def _transcribe_file(self, audio_path: Path) -> str:
+        return await self._client.transcribe(audio_path)
 
     def _build_segments_from_chunks(
         self,
@@ -366,4 +323,4 @@ class WhisperAsrClient:
             return float(self.settings.asr_chunk_seconds)
 
     async def close(self) -> None:
-        self._model = None
+        return None
