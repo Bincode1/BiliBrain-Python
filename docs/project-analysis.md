@@ -1,227 +1,313 @@
 # BiliBrain 系统分析报告
 
-## 一、系统定位
+## 一、当前定位
 
-**BiliBrain** 是一个围绕 B站收藏夹构建的 **个人视频知识工作台**。它将用户收藏的视频转化为可搜索、可摘要、可问答的知识库，核心能力包括：
+**BiliBrain** 当前不是单纯的“视频摘要工具”或“聊天式 RAG Demo”，而是一个以 **B 站收藏夹为入口** 的个人视频知识工作台。
 
-- **视频采集** — 从 B站收藏夹自动同步视频元数据与音频
-- **语音转写 (ASR)** — 使用 faster-whisper 对音频进行中文语音识别
-- **智能摘要** — 自动生成单视频 / 整文件夹的视频摘要
-- **RAG 问答** — 基于向量检索 + BM25 混合搜索的知识库问答
-- **AI Agent** — 带工具调用、技能激活、人机协同审批的统一智能代理
+按实际代码实现，它已经形成了三条明确主线：
+
+- **视频知识摄取**：收藏夹同步、音频下载、ASR 转写、切块、向量化、摘要生成
+- **统一 Agent 问答**：围绕单视频、收藏夹或全局知识库做检索、总结、追问与工具调用
+- **知识沉淀与执行**：通过 skills、workspace tools、审批恢复和 Obsidian 导出，把问答扩展成可执行工作流
+
+当前系统的重点不再只是“回答问题”，而是把视频内容沉淀成一个可检索、可追问、可导出的本地知识环境。
 
 ---
 
 ## 二、整体架构
 
-```
-┌─────────────────────────────────────────────────────┐
-│                   Vue 3 Frontend                     │
-│  Chat / Library / Skills Store / Tools Store         │
-│  (SSE Streaming, Pinia, Reka UI, TailwindCSS)        │
-├─────────────────────────────────────────────────────┤
-│                  FastAPI Backend                      │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────────┐  │
-│  │  API层    │  │ Service层 │  │  LangGraph 工作流  │  │
-│  │ 15+路由   │  │ 业务逻辑  │  │ ingestion/qa/sum  │  │
-│  └──────────┘  └──────────┘  └───────────────────┘  │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────────┐  │
-│  │ Tool系统  │  │ Skill系统 │  │  Unified Agent    │  │
-│  │ 8个内置   │  │ SKILL.md │  │  ReAct循环        │  │
-│  └──────────┘  └──────────┘  └───────────────────┘  │
-├─────────────────────────────────────────────────────┤
-│                    存储层                             │
-│  SQLite (15张表)  │  ChromaDB + BM25 (混合检索)      │
-│  本地音频存储      │  可插拔存储 (预留S3)              │
-└─────────────────────────────────────────────────────┘
+```text
+┌──────────────────────────────────────────────────────────┐
+│                       Vue 3 Frontend                     │
+│  Chat / Folder Workspace / Agent Panel / Approval Bar    │
+│  SSE Streaming / Task Timeline / Sources / Tool Output   │
+├──────────────────────────────────────────────────────────┤
+│                      FastAPI Backend                     │
+│  API Routes  │ Services │ LangGraph Graphs              │
+│              │          │ - ingestion                   │
+│              │          │ - summary                     │
+│              │          │ - unified_agent               │
+├──────────────────────────────────────────────────────────┤
+│                 Tool / Skill / Agent Runtime             │
+│  ToolService + Workspace + Policy + Runtime Adapter      │
+│  SkillService + SKILL.md + LangGraph checkpoint/interrupt│
+├──────────────────────────────────────────────────────────┤
+│                         Storage                          │
+│  SQLite / Chat Store / ChromaDB / Audio Storage          │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 三、核心功能模块
+## 三、核心链路
 
-| 模块 | 关键能力 |
-|------|----------|
-| **认证** | B站 QR 扫码登录，Cookie 持久化，WBI 签名 |
-| **收藏夹管理** | 自动同步收藏夹元数据，视频搜索，标签管理 |
-| **视频处理流水线** | 8 步 LangGraph 状态机：音频下载 → ASR → 分段 → 嵌入 → 入库 → 摘要 |
-| **ASR 语音识别** | faster-whisper + CUDA，静音对齐分块，并发转写，重叠去重 |
-| **混合检索** | ChromaDB 稠密向量 + jieba BM25 关键词，RRF 融合 (65:35) |
-| **QA 问答** | 智能路由 (keyword heuristic + LLM planner)，chunk/summary 双策略，引用标注 |
-| **摘要生成** | 短文本直接生成，长文本窗口化摘要-归约，transcript hash 缓存 |
-| **统一 Agent** | ReAct 循环，8 个内置工具，技能系统，SSE 流式输出 |
-| **工具系统** | 文件读写、命令执行、Web搜索、浏览器阅读，支持本地/Docker沙箱运行时 |
-| **技能系统** | SKILL.md 声明式定义，三层来源 (内置/用户/仓库)，动态激活 |
-| **人机协同 (HITL)** | 写操作和命令执行需用户审批，暂停/恢复机制 |
+### 1. 收藏夹同步与视频摄取
+
+系统从 Bilibili 扫码登录开始，持久化 Cookie 后同步收藏夹与视频元数据。
+
+对单个视频的处理由 `graphs/ingestion` 驱动，核心步骤是：
+
+1. 下载音频并写入音频存储
+2. 用 `ffmpeg` 做静音检测和切块
+3. 基于 Qwen ASR 并发转写每个音频块
+4. 对转写结果做重叠去重和分段合并
+5. 生成 embedding 并写入 ChromaDB
+6. 触发单视频摘要生成
+
+这一条链路已经不是串行脚本，而是带状态回写、阶段进度和失败暴露的 LangGraph 流程。
+
+### 2. 摘要链路
+
+`graphs/summary` 负责单视频摘要生成，策略很清晰：
+
+- 文本较短时，直接对合并后的 transcript 生成摘要
+- 文本较长时，先按窗口生成局部摘要，再做一次归约
+- 用 `transcript_hash` 做缓存校验，避免重复生成
+
+这说明摘要不是一个“顺手附加功能”，而是摄取链路中的正式产物。
+
+### 3. 混合检索与问答范围
+
+当前知识检索建立在 `LocalVectorStore` 上，核心设计是：
+
+- **ChromaDB 稠密检索**
+- **jieba + BM25 关键词检索**
+- **RRF 融合，权重 0.65 / 0.35**
+- 在视频 / 收藏夹 / 全局三个范围内做过滤
+
+同时系统暴露了两类检索工具：
+
+- `search_knowledge_base`：面向 chunk 级细节问题
+- `search_video_summaries`：面向跨视频总结、对比、概览问题
+
+也就是说，问答链路已经明确区分“查细节”和“做概括”两类任务，而不是把所有问题都塞给同一套上下文拼接逻辑。
+
+### 4. Unified Agent 主链路
+
+当前 `/api/ask` 和 `/api/ask/stream` 已经不再走旧式单一 QA 函数，而是进入基于 LangGraph 的 unified agent graph。
+
+图结构是显式拆开的：
+
+```text
+START
+  -> load_context
+  -> model_step
+  -> select_next_tool_call
+  -> approval_gate
+  -> execute_tool
+  -> model_step / finalize_answer / finalize_error / finalize_rejected
+  -> END
+```
+
+这条链路的关键点有：
+
+- `load_context` 负责解析当前视频 / 收藏夹 / 全局范围，组装系统提示词、近期历史、结构化记忆和 workspace 运行态
+- `model_step` 使用 Qwen 模型并绑定检索工具、skill 工具和 workspace tools，流式解析模型输出和 tool call chunks
+- `select_next_tool_call` 将模型一次返回的多个 tool call 拆成队列逐个执行
+- `approval_gate` 对 `run_command/write_file/append_file/make_dir/obsidian_write_note/skill` 等敏感动作触发 LangGraph `interrupt`
+- `execute_tool` 统一执行工具，并把工具结果作为 `ToolMessage` 回灌给模型继续推理
+- `finalize_*` 统一做引用规范化、答案落库、上下文统计刷新和 task 状态收尾
+
+运行时层面，系统还做了：
+
+- 使用 LangGraph SQLite checkpointer 保存每个 task 的 graph state
+- 用 `thread_id=task-{task_id}` 将一次用户请求绑定为可恢复任务
+- 在中断时持久化 task、approval、tool_use 和 assistant placeholder
+- 前端通过 `/api/agent/resume/stream` 提交 approve / edit / reject 后继续执行
+- SSE 事件流把 answer、sources、tool_use、approval、task_status、skills、context 等状态实时推到前端
+
+这意味着系统已经从“知识库问答”进入“可执行 Agent 工作台”阶段。
+
+### 5. Tool / Skill / Approval
+
+工具层不是直接让模型碰宿主机，而是经过统一底座：
+
+- `ToolService`
+- `Workspace`
+- `Policy`
+- `Runtime Adapter`
+
+当前已注册的工具包括：
+
+- 文件工具：`list_dir/read_file/write_file/append_file/make_dir`
+- 命令工具：`run_command`
+- Web 工具：`web_search/browser_read_page`
+- Obsidian 工具：`obsidian_write_note/obsidian_read_note`
+
+技能层采用 `SKILL.md + YAML frontmatter` 的声明式方式，支持：
+
+- 多来源扫描 `SKILL.md`，并按 precedence 处理同名覆盖
+- 从 frontmatter 中解析 name、description、when-to-use、allowed-tools、requires 等元信息
+- 自动收集 `references/scripts/assets/agents` 等资源目录，并生成 resource map
+- 动态激活 / 停用，激活状态持久化到数据库
+- 模型可见性控制、会话级 skill 审批、加载记录跟踪
+- 读取 skill 时注入 `BILIBRAIN_SKILL_DIR`、`resource_map`、`usage_rules`
+
+当前 prompt 设计里，skill 的职责被限制为“流程组织”，事实来源仍必须来自工具返回结果。这一点避免了 skill 变成不可控的知识兜底。
+
+审批机制则通过 LangGraph interrupt 实现。需要写入、执行或外部落盘时，后端会暂停任务，前端显示审批条，用户可以：
+
+- 同意执行
+- 修改参数后继续
+- 拒绝
+
+### 6. 会话上下文与结构化记忆
+
+多轮会话不是简单截断历史，而是拆成四层：
+
+- recent history：保留最近若干轮完整消息
+- live prefix：尚未被压缩、但还可能需要进入上下文的历史片段
+- memory text：由旧历史压缩出来的结构化长期记忆文本
+- workspace state：运行态摘要，例如 pending approval、当前 workspace 等
+
+结构化记忆会覆盖多个信息面，例如：
+
+- 当前活跃目标
+- 当前活跃知识范围
+- 历史已完成话题
+- 已确认结论
+- 未解决问题
+- 术语与指代
+- 最近推进状态
+
+上下文组装时，系统会：
+
+1. 根据 token 统计判断是否需要压缩旧历史
+2. 调用模型把可压缩历史写成结构化 memory text
+3. 将 memory text 持久化，并刷新 context stats
+4. 组合 recent history、live prefix、memory text 和必要 workspace state 注入 prompt
+5. 将本次选择的 message ids、workspace keys 和 token 估算写入 context snapshot
+
+这套设计更适合连续追问、长任务和中断恢复场景，也能解释为什么系统在审批恢复后仍然知道当前任务进展。
+
+### 7. 前端交互形态
+
+前端当前已经不是“一个聊天框”，而是完整工作台：
+
+- 选择收藏夹 / 视频范围
+- 查看会话历史和上下文占用
+- 观看 SSE 流式回答
+- 查看工具调用轨迹和技能读取记录
+- 在审批条里直接编辑命令、路径、内容并恢复执行
+
+Agent 的执行过程已经被可视化，而不是只返回一段最终文本。
 
 ---
 
-## 四、项目亮点
+## 四、关键实现点
 
-### 1. 精心设计的混合检索引擎
+### 1. 摄取链路做成了状态机，而不是脚本
 
-不是简单的向量搜索，而是 **Dense + BM25 + Rerank** 三阶段流水线：
+`graphs/ingestion/nodes.py` 明确把视频处理拆成 audio / transcript / index / summary 多阶段，并把状态持续写回数据库。这让前端可以展示真实进度，也让失败点暴露得足够早。
 
-- ChromaDB 余弦相似度 + jieba 中文分词 BM25
-- RRF (Reciprocal Rank Fusion) 融合，权重 0.65:0.35
-- 关键词重叠二次 rerank (0.85 稠密 + 0.15 关键词)
+### 2. ASR 采用“静音切块 + 并发转写 + 重叠去重”
 
-### 2. 工业级 ASR 管线
+当前 ASR 并不是简单整段音频直接调用模型，而是：
 
-- 静音检测对齐分块 (`ffmpeg silencedetect` → `plan_silence_aligned_ranges`)
-- 并发转写 + 可配置并发度 (`asyncio.Semaphore`)
-- 块间重叠智能去重 (`trim_repeated_prefix`)
-- CUDA 加速 + 自动 CPU 回退
+- `ffmpeg silencedetect` 找切分点
+- 依据目标时长生成 chunk
+- 并发调用 Qwen ASR
+- 对相邻块的重复前缀做裁剪
 
-### 3. 统一 Agent 架构
+这套方式明显是面向长视频稳定性做的工程设计。
 
-手写 ReAct 循环而非使用 LangGraph Agent，原因明确：**避免 msgpack 序列化问题**，获得对 HITL 审批流的完全控制。这是一个成熟的架构取舍决策。
+### 3. 检索层是稠密与关键词混合，而不是单一向量库
 
-### 4. 声明式技能系统
+`db/vector_store.py` 里对 ChromaDB 和 BM25 做并行查询，再用 RRF 融合结果。对于中文视频知识库，这比单纯 dense search 更稳，也更贴合简历里应强调的检索设计能力。
 
-用 `SKILL.md` + YAML frontmatter 定义技能，支持：
+### 4. Unified Agent 已经迁到 LangGraph 图运行时
 
-- 三层来源：`builtin_skills/` / `~/.bilibrain/skills/` / `.agents/skills/`
-- 每个技能声明允许使用的工具列表
-- 运行时动态激活/停用，状态持久化到数据库
+当前实现不是“手写循环凑一个 Agent”，而是：
 
-### 5. 内存感知的对话系统
+- 用 LangGraph graph 编排 agent 节点
+- 用 SQLite checkpoint 保存执行状态
+- 用 interrupt 承接审批
+- 用 `resume` 接口恢复执行
 
-不是简单截断历史，而是 **LLM 驱动的结构化记忆压缩**：
+这是一个更接近生产形态的 agent runtime。
 
-- 超过 50k tokens 自动触发压缩
-- 压缩输出包含"活跃目标"、"已确认结论"、"术语映射"等结构化字段
-- 上下文统计跟踪避免重复压缩
+### 5. Obsidian 导出不是拼 CLI，而是专用工具链
 
-### 6. 完整的工具安全模型
+`obsidian_write_note` 会：
 
-- **策略层**：命令前缀黑白名单
-- **审批机制**：写/执行操作必须用户确认
-- **隔离运行时**：本地子进程或 Docker 沙箱 (含资源限制)
-- **工作区隔离**：每个会话独立文件系统空间
+- 解析 vault path
+- 直接写入 Markdown
+- 再读回校验正文是否完整
 
-### 7. 工程化的摄取调度器
+这比“调用命令然后假设成功”严谨得多，也让知识沉淀链路真正可用。
 
-- 任务去重、Worker ID 分配、心跳检测
-- 可配置并发度、过期任务自动标记
-- 支持独立 worker 进程 (`ingestion_worker.py`)
+### 6. 聊天系统开始具备长期任务能力
 
-### 8. 前端体验
-
-- SSE 实时流式输出 (token/sources/reasoning/tool/approval 多事件类型)
-- 引用轮播、思维链可视化、工具执行面板
-- 智能滚动 (`useSmartScroll`)
-- 斜杠命令输入提示
+消息、task、approval、tool_use、memory text 和 context stats 都有明确持久化结构，说明系统已经开始支持“带状态的持续任务”，而不仅是一次性问答。
 
 ---
 
 ## 五、技术栈总览
 
-| 层次 | 技术 |
-|------|------|
-| 前端 | Vue 3.5 + Pinia 3 + Reka UI + TailwindCSS 4 + Vite 6 |
-| 后端 | Python 3.13 + FastAPI + uvicorn |
-| AI | LangChain + LangGraph + Qwen (DashScope) + faster-whisper |
-| 向量库 | ChromaDB + rank-bm25 + jieba |
-| 数据库 | SQLite (aiosqlite, WAL 模式) |
-| HTTP | httpx + curl-cffi (B站浏览器伪装) |
-| 部署 | 单进程 (FastAPI 托管前端静态文件) |
+| 层次 | 当前代码对应技术 |
+|------|------------------|
+| 前端 | Vue 3.5、Pinia 3、Vue Router 4、Reka UI、Tailwind CSS 4、Vite 6 |
+| 后端 | Python 3.13、FastAPI、uvicorn |
+| AI 编排 | LangChain、LangGraph、LangGraph SQLite checkpoint |
+| 模型 | Qwen（DashScope）、Qwen ASR |
+| 检索 | ChromaDB、rank-bm25、jieba |
+| 存储 | SQLite、音频存储服务、本地 workspace |
+| 工具运行时 | local_dev、Docker sandbox、Obsidian CLI |
+| 网络层 | httpx、curl-cffi |
+
+说明：
+
+- 仓库当前主存储与索引实现是 `SQLite + ChromaDB`，不是 `MySQL + Milvus`
+- 仓库当前已有 RAGAS 依赖和评测模式配置，但主链路重点仍是摄取、检索和 unified agent
 
 ---
 
-## 六、数据库设计 (15 张表)
+## 六、关键接口
 
-| 表名 | 用途 |
-|------|------|
-| `app_state` | KV 存储 (认证 Cookie、缓存时间戳) |
-| `folders` | B站收藏夹元数据 |
-| `videos` | 视频元数据 (bvid, 标题, UP主, 时长, 音频引用, 标签) |
-| `transcripts` | ASR 转写结果 (全文, 分段 JSON, 模型信息) |
-| `video_summaries` | 生成的摘要 (含 transcript hash 用于缓存失效) |
-| `video_pipeline` | 处理状态机 (audio → transcript → index) |
-| `ingestion_batches` | 批量处理分组 |
-| `ingestion_tasks` | 任务队列 (状态, worker 分配, 锁定) |
-| `chat_conversations` | 会话元数据 (scope, folder_id, 标题) |
-| `chat_messages` | 消息记录 (用户/助手, 内容, 来源 JSON) |
-| `chat_conversation_memory` | 压缩后的长期记忆 |
-| `chat_conversation_context_stats` | Token 计数与压缩记录 |
-| `tool_workspaces` | 隔离的工作区目录 |
-| `tool_calls` | 工具执行审计日志 |
-| `skill_activations` | 技能激活状态 |
+### 认证与目录
 
----
+- `GET /api/auth/session`
+- `POST /api/auth/qr/start`
+- `GET /api/folders`
+- `GET /api/folders/{folder_id}/videos`
+- `POST /api/sync`
 
-## 七、API 路由一览
+### 视频处理
 
-### 认证
+- `POST /api/videos/{bvid}/process`
+- `GET /api/videos/{bvid}/process/status`
+- `GET /api/videos/{bvid}/transcript`
+- `GET /api/videos/{bvid}/summary`
+- `POST /api/videos/{bvid}/summary`
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/auth/session` | 获取当前登录状态 |
-| POST | `/api/auth/qr/start` | 生成登录二维码 |
-| GET | `/api/auth/qr/poll` | 轮询扫码状态 |
+### 聊天与 Agent
 
-### 收藏夹
+- `POST /api/ask`
+- `POST /api/ask/stream`
+- `POST /api/agent/resume`
+- `POST /api/agent/resume/stream`
+- `GET /api/chat/history`
+- `GET /api/chat/conversations`
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/folders` | 列出所有收藏夹 |
-| GET | `/api/folders/{id}/videos` | 列出收藏夹内视频 |
-| GET | `/api/folders/{id}/bili-search` | 按标题搜索B站视频 |
-| POST | `/api/sync` | 同步收藏夹元数据 |
+### 技能与工具
 
-### 视频
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/videos/{bvid}/transcript` | 获取转写文本 |
-| GET | `/api/videos/{bvid}/summary` | 获取摘要 |
-| POST | `/api/videos/{bvid}/summary` | 生成摘要 |
-| GET | `/api/videos/{bvid}/process/status` | 查询处理状态 |
-| POST | `/api/videos/{bvid}/process` | 启动处理流水线 |
-| POST | `/api/videos/{bvid}/reset` | 重置视频处理 |
-| POST | `/api/videos/{bvid}/tags` | 更新手动标签 |
-
-### 问答 / 聊天
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/ask/stream` | SSE 流式统一 Agent 问答 |
-| POST | `/api/ask` | 非流式问答 |
-| GET | `/api/chat/conversations` | 列出所有会话 |
-| POST | `/api/chat/conversations` | 创建新会话 |
-| DELETE | `/api/chat/conversations/{id}` | 删除会话 |
-| PATCH | `/api/chat/conversations/{id}` | 重命名会话 |
-| GET | `/api/chat/history` | 获取聊天历史 |
-
-### 技能
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/skills` | 列出所有技能 |
-| GET | `/api/skills/{name}` | 获取技能详情 |
-| POST | `/api/skills/create` | 创建新技能 |
-| POST | `/api/skills/activate` | 激活技能 |
-| POST | `/api/skills/deactivate` | 停用技能 |
-
-### 工具
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/tools` | 列出所有工具 |
-| GET | `/api/tools/workspaces` | 列出工作区 |
-| POST | `/api/tools/workspaces` | 创建工作区 |
-| POST | `/api/tools/call` | 执行工具 |
-
-### 技能 Agent
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/skill-agent/ask/stream` | 流式技能 Agent |
-| POST | `/api/skill-agent/resume` | 恢复 (HITL 审批后) |
+- `GET /api/skills`
+- `POST /api/skills/activate`
+- `POST /api/skills/deactivate`
+- `GET /api/tools`
+- `POST /api/tools/workspaces`
+- `POST /api/tools/call`
 
 ---
 
-## 八、总结
+## 七、当前结论
 
-BiliBrain 是一个完成度相当高的个人知识管理系统。它不是简单的 LLM 套壳应用，而是在 **混合检索、ASR 管线、Agent 工具安全、对话记忆管理** 等方面都有深入工程设计的系统。特别是 Agent + 工具 + 技能 + HITL 的组合，使其不仅是一个问答系统，而是一个可扩展的 AI 工作平台。
+BiliBrain 当前最准确的描述不是“一个视频问答项目”，而是：
+
+> 一个以 B 站收藏夹为知识入口，融合视频摄取、混合检索、统一 Agent、技能系统、工具审批和 Obsidian 导出的个人 AI 视频知识工作台。
+
+如果用于简历，应该重点突出三件事：
+
+1. 你把视频内容处理链路做成了稳定的 LangGraph 工作流
+2. 你把检索问答扩展成了带工具和审批的统一 Agent
+3. 你把回答结果进一步沉淀到了本地知识库，而不是停留在聊天窗口

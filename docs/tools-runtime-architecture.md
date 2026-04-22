@@ -6,13 +6,15 @@
 
 ## Overview
 
-本文档说明 BiliBrain 当前已经落地的工具系统实现。目标不是直接把问答链路改造成全工具 Agent，而是先搭建一套可复用、可隔离、可审计的工具执行基础设施，为后续接入 LangGraph Agent、工具规划、审批 UI 和多工具协作提供底座。
+本文档说明 BiliBrain 当前已经落地的工具系统实现，以及它在统一 Agent 主链路中的接入方式。当前系统不再只是“为未来 Agent 预留工具底座”，而是已经通过 LangGraph unified agent graph 把检索工具、workspace tools、技能加载、审批中断与恢复接到 `/api/ask` 主入口。
 
 当前系统已经支持：
 
 - 工作区隔离 `workspace`
 - 文件工具 `list_dir/read_file/write_file/append_file/make_dir`
 - 命令执行工具 `run_command`
+- Web 工具 `web_search/browser_read_page`
+- Obsidian 工具 `obsidian_write_note/obsidian_read_note`
 - 两种 runtime：
   - `local_dev`
   - `docker_sandbox`
@@ -23,15 +25,15 @@
   - 命令审批
 - FastAPI 工具接口
 - LangChain `@tool` 适配层
-- 前端手工联调面板
+- QA 检索工具与 unified agent 集成
+- 前端手工联调面板、任务轨迹面板与审批条
 
 当前系统还没有做：
 
-- 问答主链路中的自动工具调用
-- 前端审批流
 - Docker 持久会话容器
 - `grep/glob/delete/move` 等更完整文件工具
-- 浏览器、搜索、邮件工具
+- `run_command` 的流式 stdout/stderr
+- 更完整的工具历史检索与 diff 预览
 
 ---
 
@@ -58,7 +60,7 @@
 
 ```mermaid
 flowchart TD
-    A["Frontend Tools Panel / Future Agent"] --> B["FastAPI Tools Routes"]
+    A["Frontend Tools Panel / Unified Agent"] --> B["FastAPI Tools Routes"]
     B --> C["ToolService"]
     C --> D["Policy Engine"]
     C --> E["Workspace Resolver"]
@@ -108,6 +110,12 @@ API 接入位于：
 - [`bilibrain/api/router.py`](/D:/AI_Projects/BiliBrain/bilibrain/bilibrain/api/router.py)
 - [`bilibrain/core/runtime.py`](/D:/AI_Projects/BiliBrain/bilibrain/bilibrain/core/runtime.py)
 
+Agent 集成位于：
+
+- [`bilibrain/services/unified_agent_graph_runtime.py`](/D:/AI_Projects/BiliBrain/bilibrain/bilibrain/services/unified_agent_graph_runtime.py)
+- [`bilibrain/services/unified_agent.py`](/D:/AI_Projects/BiliBrain/bilibrain/bilibrain/services/unified_agent.py)
+- [`bilibrain/graphs/unified_agent/graph.py`](/D:/AI_Projects/BiliBrain/bilibrain/bilibrain/graphs/unified_agent/graph.py)
+
 前端联调位于：
 
 - [`frontend/src/views/ToolsStoreView.vue`](/D:/AI_Projects/BiliBrain/frontend/src/views/ToolsStoreView.vue)
@@ -146,7 +154,7 @@ API 接入位于：
 - `network_access`
 - `external_notify`
 
-目前实际落地的是前三类中的前两类和命令执行。
+当前这五类能力在代码里都已经有实际工具落地。
 
 ### 2. Workspace Isolation
 
@@ -200,6 +208,7 @@ API 接入位于：
   - `append_file`
   - `make_dir`
   默认都需要 `preapproved`
+- `obsidian_write_note` 会额外要求显式审批
 
 命令策略返回的是 `ToolPolicyDecision`：
 
@@ -219,6 +228,10 @@ API 接入位于：
 - `append_file`
 - `make_dir`
 - `run_command`
+- `web_search`
+- `browser_read_page`
+- `obsidian_write_note`
+- `obsidian_read_note`
 
 注册表的作用：
 
@@ -317,6 +330,7 @@ sequenceDiagram
 
 - `read_file/list_dir`：默认不需要审批
 - `write_file/append_file/make_dir`：默认需要 `preapproved`
+- `obsidian_write_note`：默认需要显式审批
 
 ---
 
@@ -541,8 +555,12 @@ sequenceDiagram
 - `read_file`
 - `write_file`
 - `append_file`
+- `obsidian_write_note`
+- `obsidian_read_note`
 - `make_dir`
 - `run_command`
+- `web_search`
+- `browser_read_page`
 
 这层的定位是：
 
@@ -725,12 +743,11 @@ sequenceDiagram
 
 当前还存在这些限制：
 
-1. 问答主链路还没有自动工具调用
-2. `run_command` 还不是流式输出
-3. Docker runtime 现在是一命令一容器，不是持久 shell session
-4. 没有前端审批 UI
-5. 文件工具还没有 `delete/move/copy/glob/grep`
-6. 工具日志没有前端历史面板
+1. `run_command` 还不是流式输出
+2. Docker runtime 现在是一命令一容器，不是持久 shell session
+3. 文件工具还没有 `delete/move/copy/glob/grep`
+4. 还缺更细的写入 diff 预览和命令结果二次确认
+5. workspace 级工具历史检索仍然偏基础
 
 ---
 
@@ -738,30 +755,29 @@ sequenceDiagram
 
 ### 优先级高
 
-- 把 `ToolCall` 历史和 workspace 状态展示到前端
 - 加 `glob_files` 和 `grep_files`
-- 给前端加更清晰的审批提示
+- 给写操作加入 diff 预览
+- 增强 workspace 历史与审计检索
 
 ### 优先级中
 
 - 把 `run_command` 做成 SSE 流式输出
 - 引入 session 级 Docker 容器
-- 为写操作加入 diff 预览
 
 ### 优先级高但要谨慎
 
-- 新增单独的 `tool-capable agent`
-- 不要直接污染当前稳定的 RAG QA graph
+- 扩大可写工具集合前，先补强策略校验与结果验证
+- 保持检索型工具和执行型工具的职责边界，避免主链路失控
 
 推荐路线：
 
-- 保持现有 QA 图只做知识问答
-- 单独新增 `workspace agent` 模式
-- 该模式下才把 `build_langchain_tools(...)` 注入给模型
+- 保持 `ToolService + Workspace + Policy + Runtime Adapter` 作为统一执行底座
+- 继续在 unified agent graph 中按需扩展工具，而不是把权限逻辑散落到各 graph 节点
+- 优先补齐流式命令输出、diff 预览和更完整文件工具
 
 ---
 
 ## One-Sentence Summary
 
-当前 BiliBrain 已经落地了一套独立于问答主链路的工具运行基础设施：  
-它通过 `ToolService + Workspace + Policy + Runtime Adapter` 这四层，把文件操作和命令执行变成了可隔离、可审计、可扩展的工具系统，并已经支持切换到 Docker sandbox 执行。
+当前 BiliBrain 已经把工具系统真正接入统一 Agent 主链路：
+它通过 `ToolService + Workspace + Policy + Runtime Adapter` 这四层，把文件、命令、Web 和 Obsidian 操作变成了可隔离、可审计、可审批、可恢复的执行能力，并已经用于 `/api/ask` 的实际任务流转。
