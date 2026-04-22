@@ -123,7 +123,9 @@ export function normalizeChatMessage(message, fallbackConversationId = null) {
   return {
     message_id: message.message_id || null,
     conversation_id: message.conversation_id || fallbackConversationId || null,
+    task_id: message.task_id || null,
     role: message.role === "assistant" ? "assistant" : "user",
+    message_kind: message.message_kind || "default",
     text: message.text ?? message.content ?? "",
     answer_mode: message.answer_mode || null,
     route_mode: message.route_mode || null,
@@ -199,6 +201,73 @@ export function normalizeConversation(conversation) {
     message_count: Number(conversation.message_count || 0),
     created_at: conversation.created_at || "",
     updated_at: conversation.updated_at || "",
+  };
+}
+
+export function normalizeTask(task, fallbackConversationId = null) {
+  return {
+    task_id: task.task_id || null,
+    conversation_id: task.conversation_id || fallbackConversationId || null,
+    user_message_id: task.user_message_id || null,
+    assistant_message_id: task.assistant_message_id || null,
+    status: task.status || "queued",
+    phase: task.phase || "preparing",
+    route_mode: task.route_mode || null,
+    answer_mode: task.answer_mode || null,
+    pending_tool_use_id: task.pending_tool_use_id || null,
+    retry_count: Number(task.retry_count || 0),
+    failure_reason: task.failure_reason || "",
+    metadata: task.metadata && typeof task.metadata === "object" ? task.metadata : {},
+    created_at: task.created_at || "",
+    updated_at: task.updated_at || "",
+    completed_at: task.completed_at || "",
+  };
+}
+
+export function normalizeToolUse(toolUse) {
+  return {
+    tool_use_id: toolUse.tool_use_id || null,
+    task_id: toolUse.task_id || null,
+    tool_name: toolUse.tool_name || "",
+    status: toolUse.status || "pending",
+    input_summary: toolUse.input_summary && typeof toolUse.input_summary === "object" ? toolUse.input_summary : {},
+    raw_input: toolUse.raw_input && typeof toolUse.raw_input === "object" ? toolUse.raw_input : {},
+    raw_output: toolUse.raw_output === undefined ? null : toolUse.raw_output,
+    error:
+      toolUse.error == null
+        ? null
+        : typeof toolUse.error === "object"
+          ? toolUse.error
+          : { message: String(toolUse.error) },
+    request_id: toolUse.request_id || null,
+    started_at: toolUse.started_at || "",
+    finished_at: toolUse.finished_at || "",
+    updated_at: toolUse.updated_at || "",
+  };
+}
+
+export function normalizeApproval(approval) {
+  return {
+    approval_id: approval.approval_id || null,
+    task_id: approval.task_id || null,
+    tool_use_id: approval.tool_use_id || null,
+    status: approval.status || "pending",
+    request_payload: approval.request_payload && typeof approval.request_payload === "object" ? approval.request_payload : {},
+    decision_payload: approval.decision_payload && typeof approval.decision_payload === "object" ? approval.decision_payload : null,
+    created_at: approval.created_at || "",
+    resolved_at: approval.resolved_at || "",
+    updated_at: approval.updated_at || "",
+  };
+}
+
+export function normalizeTaskEvent(taskEvent) {
+  return {
+    event_id: taskEvent.event_id || null,
+    task_id: taskEvent.task_id || null,
+    tool_use_id: taskEvent.tool_use_id || null,
+    event_type: taskEvent.event_type || "",
+    payload: taskEvent.payload && typeof taskEvent.payload === "object" ? taskEvent.payload : {},
+    created_at: taskEvent.created_at || "",
   };
 }
 

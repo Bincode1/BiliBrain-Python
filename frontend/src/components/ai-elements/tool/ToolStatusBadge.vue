@@ -19,13 +19,13 @@ const props = defineProps<{
 
 const label = computed(() => {
   const labels: Record<ToolPart['state'], string> = {
-    'input-streaming': 'Pending',
-    'input-available': 'Running',
-    'approval-requested': 'Awaiting Approval',
-    'approval-responded': 'Responded',
-    'output-available': 'Completed',
-    'output-error': 'Error',
-    'output-denied': 'Denied',
+    'input-streaming': '准备中',
+    'input-available': '执行中',
+    'approval-requested': '等待审批',
+    'approval-responded': '已确认',
+    'output-available': '已完成',
+    'output-error': '执行失败',
+    'output-denied': '已拒绝',
   }
   return labels[props.state]
 })

@@ -75,6 +75,7 @@
 
 <script setup>
 import { computed } from "vue";
+import { useChatStore } from "@/stores/chat";
 import {
   messageModeLabel,
   messageRouteLabel,
@@ -92,11 +93,13 @@ const props = defineProps({
 
 defineEmits(["toggleSources"]);
 
+const store = useChatStore();
+
 const hasAgentContent = computed(() =>
   !!(
+    store.hasTaskActivity(props.message.task_id) ||
     props.message.agent_events?.length ||
     props.message.active_skills?.length ||
-    props.message.loaded_skills?.length ||
     props.message.skill_events?.length ||
     props.message.tool_events?.length
   )

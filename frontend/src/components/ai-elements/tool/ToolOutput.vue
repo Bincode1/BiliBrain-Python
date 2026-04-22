@@ -15,7 +15,9 @@ interface Props extends /* @vue-ignore */ HTMLAttributes {
 
 const props = defineProps<Props>()
 
-const showOutput = computed(() => props.output || props.errorText)
+const showOutput = computed(
+  () => (props.output !== null && props.output !== undefined) || !!props.errorText,
+)
 
 const isObjectOutput = computed(
   () => typeof props.output === 'object' && !isVNode(props.output),
@@ -39,7 +41,7 @@ const formattedOutput = computed(() => {
     <h4
       class="font-medium text-muted-foreground text-xs uppercase tracking-wide"
     >
-      {{ props.errorText ? "Error" : "Result" }}
+      {{ props.errorText ? "错误" : "结果" }}
     </h4>
     <div
       :class="
@@ -52,7 +54,7 @@ const formattedOutput = computed(() => {
       "
     >
       <!-- Error text -->
-      <div v-if="errorText">
+      <div v-if="errorText" class="whitespace-pre-wrap p-3">
         {{ props.errorText }}
       </div>
 
@@ -65,7 +67,7 @@ const formattedOutput = computed(() => {
       <CodeBlock
         v-else-if="isStringOutput"
         :code="formattedOutput"
-        language="json"
+        language="text"
       />
       <div v-else>
         {{ props.output }}

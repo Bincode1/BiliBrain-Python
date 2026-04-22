@@ -3,7 +3,14 @@ import { defineStore } from "pinia";
 
 import { clearStatus, createStatus, setStatus } from "@/composables/useStatus";
 import { api } from "@/services/http";
-import { normalizeChatMessage, normalizeConversation } from "@/utils/chat";
+import {
+  normalizeApproval,
+  normalizeChatMessage,
+  normalizeConversation,
+  normalizeTask,
+  normalizeTaskEvent,
+  normalizeToolUse,
+} from "@/utils/chat";
 import { parseSseEvent, parseSseFrames } from "@/utils/sse";
 import { useAuthStore } from "./auth";
 import { useDialogStore } from "./dialog";
@@ -13,6 +20,7 @@ const SCOPE_VIDEO = "video";
 const SCOPE_FOLDER = "folder";
 const SCOPE_GLOBAL = "global";
 const STORAGE_KEY = "bilibrain_workspace_state";
+const TRANSIENT_ASSISTANT_TEXTS = new Set(["", "正在思考...", "等待你审批后继续执行。"]);
 
 export const useChatStore = defineStore("chat", () => {
   const chatStatus = createStatus();
@@ -25,6 +33,10 @@ export const useChatStore = defineStore("chat", () => {
   const chatContextUsage = ref({ conversationId: null, currentTokens: 0, limitTokens: 50000 });
   const chatConversations = ref([]);
   const chatMessages = ref([]);
+  const chatTasks = ref([]);
+  const chatToolUses = ref([]);
+  const chatApprovals = ref([]);
+  const chatTaskEvents = ref([]);
   const chatHistoryLoading = ref(false);
   const chatConversationsLoading = ref(false);
   const deletingConversationId = ref(null);
@@ -179,6 +191,10 @@ export const useChatStore = defineStore("chat", () => {
     activeConversationId.value = null;
     chatConversations.value = [];
     chatMessages.value = [];
+    chatTasks.value = [];
+    chatToolUses.value = [];
+    chatApprovals.value = [];
+    chatTaskEvents.value = [];
     agentPendingApproval.value = null;
   }
 
@@ -193,6 +209,173 @@ export const useChatStore = defineStore("chat", () => {
     message[field].push({ ...item, _id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}` });
   }
 
+  function upsertByKey(listRef, keyField, item, normalizer = (value) => value) {
+    const normalized = normalizer(item);
+    const key = normalized?.[keyField];
+    if (!key) return normalized;
+    const next = [...listRef.value];
+    const index = next.findIndex((entry) => String(entry?.[keyField] || "") === String(key));
+    if (index >= 0) next[index] = { ...next[index], ...normalized };
+    else next.push(normalized);
+    listRef.value = next;
+    return normalized;
+  }
+
+  function appendTaskEventRecord(item) {
+    const normalized = normalizeTaskEvent(item);
+    if (!normalized.event_id) {
+      normalized.event_id = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    }
+    chatTaskEvents.value = [...chatTaskEvents.value, normalized];
+    return normalized;
+  }
+
+  function getTaskById(taskId = null) {
+    const normalizedTaskId = String(taskId || "").trim();
+    if (!normalizedTaskId) return null;
+    return chatTasks.value.find((item) => String(item.task_id || "").trim() === normalizedTaskId) || null;
+  }
+
+  function getToolUseById(toolUseId = null) {
+    const normalizedToolUseId = String(toolUseId || "").trim();
+    if (!normalizedToolUseId) return null;
+    return chatToolUses.value.find((item) => String(item.tool_use_id || "").trim() === normalizedToolUseId) || null;
+  }
+
+  function getApprovalById(approvalId = null) {
+    const normalizedApprovalId = String(approvalId || "").trim();
+    if (!normalizedApprovalId) return null;
+    return chatApprovals.value.find((item) => String(item.approval_id || "").trim() === normalizedApprovalId) || null;
+  }
+
+  function getToolUsesByTaskId(taskId = null) {
+    const normalizedTaskId = String(taskId || "").trim();
+    if (!normalizedTaskId) return [];
+    return chatToolUses.value.filter((item) => String(item.task_id || "").trim() === normalizedTaskId);
+  }
+
+  function getApprovalsByTaskId(taskId = null) {
+    const normalizedTaskId = String(taskId || "").trim();
+    if (!normalizedTaskId) return [];
+    return chatApprovals.value.filter((item) => String(item.task_id || "").trim() === normalizedTaskId);
+  }
+
+  function getLatestApprovalByToolUseId(taskId = null, toolUseId = null) {
+    const normalizedTaskId = String(taskId || "").trim();
+    const normalizedToolUseId = String(toolUseId || "").trim();
+    if (!normalizedTaskId || !normalizedToolUseId) return null;
+    return getApprovalsByTaskId(normalizedTaskId)
+      .filter((item) => String(item.tool_use_id || "").trim() === normalizedToolUseId)
+      .sort((a, b) => String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || "")))[0] || null;
+  }
+
+  function getTaskEventsByTaskId(taskId = null) {
+    const normalizedTaskId = String(taskId || "").trim();
+    if (!normalizedTaskId) return [];
+    return chatTaskEvents.value.filter((item) => String(item.task_id || "").trim() === normalizedTaskId);
+  }
+
+  function upsertTaskRecord(item) {
+    const taskId = String(item?.task_id || "").trim();
+    if (!taskId) return null;
+    const existing = getTaskById(taskId);
+    return upsertByKey(
+      chatTasks,
+      "task_id",
+      {
+        ...(existing || {}),
+        ...item,
+        task_id: taskId,
+        conversation_id: item?.conversation_id ?? existing?.conversation_id ?? activeConversationId.value ?? null,
+      },
+      (value) => normalizeTask(value, activeConversationId.value)
+    );
+  }
+
+  function upsertToolUseRecord(item) {
+    const toolUseId = String(item?.tool_use_id || "").trim();
+    if (!toolUseId) return null;
+    const existing = getToolUseById(toolUseId);
+    return upsertByKey(
+      chatToolUses,
+      "tool_use_id",
+      {
+        ...(existing || {}),
+        ...item,
+        tool_use_id: toolUseId,
+      },
+      normalizeToolUse
+    );
+  }
+
+  function upsertApprovalRecord(item) {
+    const approvalId = String(item?.approval_id || "").trim();
+    if (!approvalId) return null;
+    const existing = getApprovalById(approvalId);
+    return upsertByKey(
+      chatApprovals,
+      "approval_id",
+      {
+        ...(existing || {}),
+        ...item,
+        approval_id: approvalId,
+      },
+      normalizeApproval
+    );
+  }
+
+  function updatePendingApprovalDecision(pendingApproval, decision) {
+    if (!pendingApproval?.taskId) return;
+    const resolvedAt = new Date().toISOString();
+    const isRejected = decision?.type === "reject";
+    const approvalId = pendingApproval.approvalId || getLatestApprovalByToolUseId(
+      pendingApproval.taskId,
+      pendingApproval.toolUseId,
+    )?.approval_id;
+
+    if (approvalId) {
+      upsertApprovalRecord({
+        approval_id: approvalId,
+        task_id: pendingApproval.taskId,
+        tool_use_id: pendingApproval.toolUseId || null,
+        status: isRejected ? "rejected" : "approved",
+        decision_payload: decision || null,
+        resolved_at: resolvedAt,
+        updated_at: resolvedAt,
+      });
+    }
+
+    if (pendingApproval.toolUseId) {
+      upsertToolUseRecord({
+        tool_use_id: pendingApproval.toolUseId,
+        task_id: pendingApproval.taskId,
+      });
+    }
+
+    upsertTaskRecord({
+      task_id: pendingApproval.taskId,
+      assistant_message_id: pendingApproval.assistantMessageId || null,
+      status: isRejected ? "failed" : "running",
+      phase: isRejected ? "rejected" : "running",
+      pending_tool_use_id: "",
+      failure_reason: isRejected ? String(decision?.message || "用户拒绝了当前操作。") : "",
+    });
+  }
+
+  function getTaskBundle(taskId = null) {
+    return {
+      task: getTaskById(taskId),
+      toolUses: getToolUsesByTaskId(taskId),
+      approvals: getApprovalsByTaskId(taskId),
+      taskEvents: getTaskEventsByTaskId(taskId),
+    };
+  }
+
+  function hasTaskActivity(taskId = null) {
+    const bundle = getTaskBundle(taskId);
+    return !!(bundle.task || bundle.toolUses.length || bundle.approvals.length || bundle.taskEvents.length);
+  }
+
   function normalizePendingApproval(payload, conversationId = null) {
     if (!payload || !payload.approval_request) return null;
     const resolvedConversationId = Number(payload.conversation_id || conversationId || activeConversationId.value || 0) || null;
@@ -200,9 +383,29 @@ export const useChatStore = defineStore("chat", () => {
       conversationId: resolvedConversationId,
       sessionId: payload.session_id || (resolvedConversationId ? `conversation-${resolvedConversationId}` : ""),
       workspaceId: payload.workspace_id || "",
+      taskId: payload.task_id || null,
+      toolUseId: payload.tool_use_id || null,
+      assistantMessageId: payload.assistant_message_id || null,
+      approvalId: payload.approval_id || null,
       approvalRequest: payload.approval_request || null,
       updatedAt: payload.updated_at || "",
     };
+  }
+
+  function findAssistantMessageForTask(taskId = null, assistantMessageId = null) {
+    const normalizedTaskId = String(taskId || "").trim();
+    const normalizedAssistantMessageId = Number(assistantMessageId || 0) || null;
+    for (let index = chatMessages.value.length - 1; index >= 0; index -= 1) {
+      const message = chatMessages.value[index];
+      if (!message || message.role !== "assistant") continue;
+      if (normalizedAssistantMessageId && Number(message.message_id) === normalizedAssistantMessageId) {
+        return message;
+      }
+      if (normalizedTaskId && String(message.task_id || "").trim() === normalizedTaskId) {
+        return message;
+      }
+    }
+    return null;
   }
 
   function normalizeContextUsage(payload, conversationId = null) {
@@ -229,10 +432,26 @@ export const useChatStore = defineStore("chat", () => {
       chatMessages.value = Array.isArray(data.messages)
         ? data.messages.map((message) => normalizeChatMessage(message, activeConversationId.value))
         : [];
+      chatTasks.value = Array.isArray(data.tasks)
+        ? data.tasks.map((item) => normalizeTask(item, activeConversationId.value))
+        : [];
+      chatToolUses.value = Array.isArray(data.tool_uses)
+        ? data.tool_uses.map((item) => normalizeToolUse(item))
+        : [];
+      chatApprovals.value = Array.isArray(data.approvals)
+        ? data.approvals.map((item) => normalizeApproval(item))
+        : [];
+      chatTaskEvents.value = Array.isArray(data.task_events)
+        ? data.task_events.map((item) => normalizeTaskEvent(item))
+        : [];
       agentPendingApproval.value = normalizePendingApproval(data.pending_approval, activeConversationId.value);
       chatContextUsage.value = normalizeContextUsage(data.context_usage, activeConversationId.value);
     } catch (error) {
       chatMessages.value = [];
+      chatTasks.value = [];
+      chatToolUses.value = [];
+      chatApprovals.value = [];
+      chatTaskEvents.value = [];
       agentPendingApproval.value = null;
       chatContextUsage.value = normalizeContextUsage(null, activeConversationId.value);
       setStatus(chatStatus, error.message, true);
@@ -277,6 +496,10 @@ export const useChatStore = defineStore("chat", () => {
       activeConversationId.value = conversation.conversation_id;
       chatConversations.value = [conversation, ...chatConversations.value.filter((item) => item.conversation_id !== conversation.conversation_id)];
       chatMessages.value = [];
+      chatTasks.value = [];
+      chatToolUses.value = [];
+      chatApprovals.value = [];
+      chatTaskEvents.value = [];
       chatInput.value = "";
       scrollChatToBottom();
     } catch (error) {
@@ -359,7 +582,7 @@ export const useChatStore = defineStore("chat", () => {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-    let answerStarted = false;
+    let answerStarted = !TRANSIENT_ASSISTANT_TEXTS.has(String(assistantMessage.text || ""));
 
     while (true) {
       const { value, done } = await reader.read();
@@ -373,10 +596,58 @@ export const useChatStore = defineStore("chat", () => {
         if (event === "conversation") {
           activeConversationId.value = data.conversation_id || null;
           chatContextUsage.value = normalizeContextUsage(chatContextUsage.value, activeConversationId.value);
+        } else if (event === "task") {
+          if (data.task_id) assistantMessage.task_id = data.task_id;
+          if (data.assistant_message_id) assistantMessage.message_id = data.assistant_message_id;
+          upsertTaskRecord({
+            task_id: data.task_id || assistantMessage.task_id || null,
+            conversation_id: activeConversationId.value || null,
+            assistant_message_id: data.assistant_message_id || assistantMessage.message_id || null,
+          });
+        } else if (event === "task_status") {
+          if (data.task_id) assistantMessage.task_id = data.task_id;
+          if (data.assistant_message_id) assistantMessage.message_id = data.assistant_message_id;
+          const resolvedTaskId = data.task_id || assistantMessage.task_id || null;
+          const existingTask = getTaskById(resolvedTaskId);
+          const hasPendingToolUseId = Object.prototype.hasOwnProperty.call(data || {}, "pending_tool_use_id");
+          upsertTaskRecord({
+            task_id: resolvedTaskId,
+            conversation_id: activeConversationId.value || null,
+            assistant_message_id: data.assistant_message_id || assistantMessage.message_id || null,
+            status: data.status || null,
+            phase: data.phase || null,
+            failure_reason: data.failure_reason ?? existingTask?.failure_reason ?? "",
+            route_mode: data.route_mode ?? existingTask?.route_mode ?? null,
+            answer_mode: data.answer_mode ?? existingTask?.answer_mode ?? null,
+            pending_tool_use_id: hasPendingToolUseId
+              ? (data.pending_tool_use_id || null)
+              : (existingTask?.pending_tool_use_id || null),
+          });
+          if (data.task_id) {
+            appendTaskEventRecord({
+              task_id: data.task_id,
+              event_type: data.status === "failed" ? "task_failed" : data.status === "completed" ? "task_completed" : "phase_changed",
+              payload: data,
+            });
+          }
         } else if (event === "route") {
           assistantMessage.route_mode = data.route_mode || null;
+          if (assistantMessage.task_id) {
+            upsertTaskRecord({
+              task_id: assistantMessage.task_id,
+              conversation_id: activeConversationId.value || null,
+              route_mode: data.route_mode || null,
+            });
+          }
         } else if (event === "mode") {
           assistantMessage.answer_mode = data.mode || null;
+          if (assistantMessage.task_id) {
+            upsertTaskRecord({
+              task_id: assistantMessage.task_id,
+              conversation_id: activeConversationId.value || null,
+              answer_mode: data.mode || null,
+            });
+          }
         } else if (event === "status") {
           assistantMessage.agent_status = data.delta || "";
           scrollChatToBottom();
@@ -391,20 +662,78 @@ export const useChatStore = defineStore("chat", () => {
           assistantMessage.sources = data.sources || [];
         } else if (event === "skill") {
           pushAgentActivity(assistantMessage, "skill_events", data);
+          if (assistantMessage.task_id) {
+            appendTaskEventRecord({
+              task_id: assistantMessage.task_id,
+              tool_use_id: data.id || null,
+              event_type: "skill",
+              payload: data,
+            });
+          }
         } else if (event === "tool") {
           pushAgentActivity(assistantMessage, "tool_events", data);
+          if (assistantMessage.task_id) {
+            appendTaskEventRecord({
+              task_id: assistantMessage.task_id,
+              tool_use_id: data.id || null,
+              event_type: "tool",
+              payload: data,
+            });
+          }
+        } else if (event === "tool_use") {
+          const normalizedToolUse = upsertToolUseRecord({
+            task_id: assistantMessage.task_id || data.task_id || null,
+            ...data,
+          });
+          if (normalizedToolUse?.task_id && assistantMessage.task_id == null) {
+            assistantMessage.task_id = normalizedToolUse.task_id;
+          }
         } else if (event === "skills") {
           assistantMessage.active_skills = Array.isArray(data.active_skills) ? data.active_skills : [];
           assistantMessage.loaded_skills = Array.isArray(data.loaded_skills) ? data.loaded_skills : [];
         } else if (event === "context") {
           chatContextUsage.value = normalizeContextUsage(data, activeConversationId.value);
         } else if (event === "approval") {
+          const approvalId = data.approval_id || `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
           agentPendingApproval.value = {
             conversationId: activeConversationId.value || null,
             sessionId: data.session_id || `conversation-${activeConversationId.value || ""}`,
             workspaceId: data.workspace_id || "",
+            taskId: data.task_id || assistantMessage.task_id || null,
+            toolUseId: data.tool_use_id || null,
+            assistantMessageId: data.assistant_message_id || assistantMessage.message_id || null,
+            approvalId,
             approvalRequest: data.approval_request || null,
           };
+          if (data.task_id) assistantMessage.task_id = data.task_id;
+          if (data.assistant_message_id) assistantMessage.message_id = data.assistant_message_id;
+          if (data.task_id) {
+            upsertApprovalRecord({
+              approval_id: approvalId,
+              task_id: data.task_id,
+              tool_use_id: data.tool_use_id || null,
+              status: "pending",
+              request_payload: {
+                session_id: data.session_id || "",
+                workspace_id: data.workspace_id || "",
+                approval_request: data.approval_request || null,
+              },
+            });
+            upsertTaskRecord({
+              task_id: data.task_id,
+              conversation_id: activeConversationId.value || null,
+              assistant_message_id: data.assistant_message_id || assistantMessage.message_id || null,
+              status: "requires_action",
+              phase: "waiting_approval",
+              pending_tool_use_id: data.tool_use_id || null,
+            });
+            appendTaskEventRecord({
+              task_id: data.task_id,
+              tool_use_id: data.tool_use_id || null,
+              event_type: "approval_requested",
+              payload: data,
+            });
+          }
           assistantMessage.agent_status = "等待你审批后继续执行。";
           if (!assistantMessage.text) assistantMessage.text = "等待你审批后继续执行。";
         } else if (event === "reasoning") {
@@ -485,6 +814,7 @@ export const useChatStore = defineStore("chat", () => {
       setStatus(chatStatus, "当前没有待审批的操作。", true);
       return;
     }
+    const pendingApproval = agentPendingApproval.value;
 
     // Resolve current scope for resume
     let scopeFolderId = null;
@@ -496,19 +826,36 @@ export const useChatStore = defineStore("chat", () => {
       scopeFolderId = Number(selectedChatFolder.value.folder_id);
     }
 
-    const assistantMessage = reactive(
+    const existingAssistant = findAssistantMessageForTask(
+      pendingApproval?.taskId,
+      pendingApproval?.assistantMessageId,
+    );
+    const assistantMessage = existingAssistant || reactive(
       normalizeChatMessage({ role: "assistant", text: "", sources: [], tool_events: [], skill_events: [], active_skills: [], loaded_skills: [] }, activeConversationId.value)
     );
     assistantMessage._streaming = true;
-    chatMessages.value.push(assistantMessage);
+    if (pendingApproval?.taskId) assistantMessage.task_id = pendingApproval.taskId;
+    if (pendingApproval?.assistantMessageId) assistantMessage.message_id = pendingApproval.assistantMessageId;
+    if (!existingAssistant) {
+      chatMessages.value.push(assistantMessage);
+    }
     try {
+      const resolvedApprovalId = pendingApproval.approvalId || getLatestApprovalByToolUseId(
+        pendingApproval.taskId,
+        pendingApproval.toolUseId,
+      )?.approval_id;
+      const resolvedDecision = resolvedApprovalId
+        ? { ...(decision || {}), approval_id: resolvedApprovalId }
+        : { ...(decision || {}) };
+      updatePendingApprovalDecision(pendingApproval, resolvedDecision);
       const response = await fetch("/api/agent/resume/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          conversation_id: agentPendingApproval.value.conversationId,
-          session_id: agentPendingApproval.value.sessionId,
-          decision,
+          conversation_id: pendingApproval.conversationId,
+          task_id: pendingApproval.taskId,
+          session_id: pendingApproval.sessionId,
+          decision: resolvedDecision,
           folder_id: scopeFolderId,
           bvid: scopeBvid,
           scope_mode: chatScopeMode.value,
@@ -519,6 +866,7 @@ export const useChatStore = defineStore("chat", () => {
     } catch (error) {
       assistantMessage.text = error.message;
       assistantMessage._streaming = false;
+      await loadChatHistory({ showLoading: false, scrollToBottomOnLoad: false });
       await refreshConversationListOnly(activeConversationId.value);
     }
   }
@@ -534,6 +882,10 @@ export const useChatStore = defineStore("chat", () => {
     chatContextUsage,
     chatConversations,
     chatMessages,
+    chatTasks,
+    chatToolUses,
+    chatApprovals,
+    chatTaskEvents,
     chatHistoryLoading,
     chatConversationsLoading,
     deletingConversationId,
@@ -547,6 +899,12 @@ export const useChatStore = defineStore("chat", () => {
     registerSmartScrollHandle,
     scrollChatToBottom,
     toggleMessageSources,
+    getTaskById,
+    getToolUsesByTaskId,
+    getApprovalsByTaskId,
+    getTaskEventsByTaskId,
+    getTaskBundle,
+    hasTaskActivity,
     setChatStatus,
     clearChatStatus,
     ensureChatScopeSelection,

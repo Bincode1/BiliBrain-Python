@@ -1,13 +1,10 @@
 <template>
-  <div v-if="hasEvents" class="not-prose w-full mb-4">
+  <div v-if="hasEvents" class="not-prose mb-4 w-full">
     <Collapsible v-model:open="isOpen" class="group rounded-md border">
-      <!-- Header — always visible -->
-      <CollapsibleTrigger class="flex w-full items-center justify-between gap-3 px-3 py-2 cursor-pointer select-none hover:bg-muted/50 transition-colors">
+      <CollapsibleTrigger class="flex w-full cursor-pointer select-none items-center justify-between gap-3 px-3 py-2 transition-colors hover:bg-muted/50">
         <div class="flex items-center gap-2">
           <component :is="statusIcon(overallState)" :class="statusIconClass(overallState)" />
-          <span class="font-medium text-sm">
-            {{ headerLabel }}
-          </span>
+          <span class="text-sm font-medium">{{ headerLabel }}</span>
           <Badge v-if="failedCount > 0" class="gap-1 rounded-full text-xs" variant="destructive">
             {{ failedCount }} 失败
           </Badge>
@@ -15,29 +12,45 @@
         <ChevronDownIcon class="size-4 text-muted-foreground transition-transform duration-200 group-data-[state=open]:rotate-180" />
       </CollapsibleTrigger>
 
-      <!-- Scrollable body -->
       <CollapsibleContent class="overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
-        <div class="max-h-80 overflow-y-auto overscroll-contain divide-y">
-          <div
-            v-for="step in allSteps"
-            :key="step.id"
-            class="px-3 py-2.5"
+        <div class="space-y-3 p-3">
+          <div v-if="taskSummary" class="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-medium text-foreground">任务阶段</span>
+              <Badge variant="secondary" class="rounded-full text-xs">{{ taskSummary.phaseLabel }}</Badge>
+              <span v-if="taskSummary.retryCount > 0">重试 {{ taskSummary.retryCount }} 次</span>
+            </div>
+            <p v-if="taskSummary.errorText" class="mt-2 text-destructive">{{ taskSummary.errorText }}</p>
+          </div>
+
+          <Tool
+            v-for="item in renderedActivities"
+            :key="item.tool_use_id"
+            :default-open="item.state !== 'output-available'"
           >
-            <div class="flex items-center gap-2 mb-1.5">
-              <component :is="step.icon" class="size-3.5 text-muted-foreground" />
-              <span class="font-medium text-sm">{{ step.label }}</span>
-              <Badge class="gap-1 rounded-full text-xs" variant="secondary">
-                <component :is="statusIcon(step.state)" :class="statusIconClass(step.state)" />
-                <span>{{ statusLabel(step.state) }}</span>
-              </Badge>
+            <ToolHeader
+              type="dynamic-tool"
+              :tool-name="item.tool_name"
+              :title="item.title"
+              :state="item.state"
+            />
+            <ToolContent>
+              <ToolInput :input="item.input" />
+              <ToolOutput :output="item.output" :error-text="item.errorText" />
+            </ToolContent>
+          </Tool>
+
+          <div
+            v-for="item in auxiliaryEvents"
+            :key="item.id"
+            class="rounded-md border bg-background px-3 py-2 text-xs"
+          >
+            <div class="mb-1 flex items-center gap-2">
+              <component :is="item.icon" class="size-3.5 text-muted-foreground" />
+              <span class="font-medium text-foreground">{{ item.label }}</span>
+              <Badge variant="secondary" class="rounded-full text-xs">{{ statusLabel(item.state) }}</Badge>
             </div>
-            <div v-if="step.input" class="ml-5.5 mb-1">
-              <span class="text-xs text-muted-foreground">{{ formatInput(step.input) }}</span>
-            </div>
-            <div v-if="step.output" class="ml-5.5">
-              <span class="text-xs text-muted-foreground truncate block max-w-full">{{ truncateOutput(step.output) }}</span>
-            </div>
-            <div v-if="step.errorText" class="ml-5.5 text-xs text-destructive">{{ step.errorText }}</div>
+            <p v-if="item.body" class="text-muted-foreground">{{ item.body }}</p>
           </div>
         </div>
       </CollapsibleContent>
@@ -48,48 +61,22 @@
 <script setup>
 import { computed, ref, watch } from "vue";
 import {
-  Search,
-  FileText,
-  Zap,
-  List,
-  FileSearch,
-  FilePenLine,
-  FolderPlus,
-  FolderOpen,
-  Terminal,
-  Globe,
-  Monitor,
-  Wrench,
   ChevronDownIcon,
   CheckCircleIcon,
-  ClockIcon,
-  XCircleIcon,
   CircleIcon,
+  ClockIcon,
+  Terminal,
+  XCircleIcon,
 } from "lucide-vue-next";
+
 import { Badge } from "@/components/ui/badge";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
-
-const ICON_MAP = {
-  search_knowledge_base: Search,
-  search_video_summaries: FileText,
-  activate_skill: Zap,
-  list_active_skills: List,
-  read_file: FileSearch,
-  write_file: FilePenLine,
-  append_file: FilePenLine,
-  make_dir: FolderPlus,
-  list_dir: FolderOpen,
-  run_command: Terminal,
-  web_search: Globe,
-  browser_read_page: Monitor,
-  skill: Zap,
-};
+import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from "@/components/ai-elements/tool";
+import { useChatStore } from "@/stores/chat";
 
 const TOOL_LABEL_MAP = {
   search_knowledge_base: "搜索知识库",
   search_video_summaries: "搜索视频摘要",
-  activate_skill: "激活技能",
-  list_active_skills: "列出已激活技能",
   read_file: "读取文件",
   write_file: "写入文件",
   append_file: "追加文件",
@@ -98,7 +85,18 @@ const TOOL_LABEL_MAP = {
   run_command: "执行命令",
   web_search: "网络搜索",
   browser_read_page: "浏览网页",
+  obsidian_write_note: "写入 Obsidian 笔记",
+  obsidian_read_note: "读取 Obsidian 笔记",
   skill: "读取技能",
+};
+
+const PHASE_LABEL_MAP = {
+  preparing: "准备中",
+  running: "执行中",
+  waiting_approval: "等待审批",
+  completed: "已完成",
+  rejected: "已拒绝",
+  failed: "失败",
 };
 
 const STATUS_ICONS = {
@@ -126,145 +124,250 @@ const props = defineProps({
   message: { type: Object, required: true },
 });
 
-const hasEvents = computed(
-  () =>
-    (props.message.skill_events?.length || 0) +
-      (props.message.tool_events?.length || 0) +
-      (props.message.loaded_skills?.length || 0) >
-    0,
+const store = useChatStore();
+
+const taskBundle = computed(() => store.getTaskBundle(props.message.task_id));
+const task = computed(() => taskBundle.value.task);
+const taskToolUses = computed(() => taskBundle.value.toolUses || []);
+const taskApprovals = computed(() => taskBundle.value.approvals || []);
+const taskEvents = computed(() => taskBundle.value.taskEvents || []);
+const skillTaskEvents = computed(() =>
+  taskEvents.value.filter((item) => item.event_type === "skill")
 );
 
-const allSteps = computed(() => {
-  const result = [];
-  const skillEvents = props.message.skill_events || [];
-  const toolEvents = props.message.tool_events || [];
-  const loadedSkills = props.message.loaded_skills || [];
-
-  // Skill events
-  for (const evt of skillEvents) {
-    result.push({
-      id: evt._id || `skill-${result.length}`,
-      label: `${evt.name || "skill"} · ${evt.phase || "start"}`,
-      icon: ICON_MAP.skill || Zap,
-      state:
-        evt.phase === "loaded" ? "completed"
-        : evt.phase === "blocked" || evt.phase === "error" ? "error"
-        : evt.phase === "approval_required" ? "pending"
-        : "running",
-      input: evt.message ? { message: evt.message } : null,
-      output: evt.phase === "loaded" ? { status: "loaded", skill_root: evt.skill_root || "" } : null,
-      errorText: evt.error || null,
-    });
-  }
-
-  for (const item of loadedSkills) {
-    result.push({
-      id: `loaded-skill-${item.name}-${result.length}`,
-      label: `已加载技能: ${item.name || ""}`,
-      icon: ICON_MAP.skill || Zap,
-      state: "completed",
-      input: {
-        actor: item.actor || "agent",
-        skill_root: item.skill_root || "",
-      },
-      output: null,
-      errorText: null,
-    });
-  }
-
-  // Tool events — pair start/finish by key
-  const toolStarts = new Map();
-  for (const evt of toolEvents) {
-    const key = `${evt.name}-${evt.workspace_id || ""}`;
-    if (evt.phase === "start") {
-      toolStarts.set(key, result.length);
-      result.push({
-        id: evt._id || `tool-${result.length}`,
-        label: TOOL_LABEL_MAP[evt.name] || evt.name || "工具调用",
-        icon: ICON_MAP[evt.name] || Wrench,
-        state: "running",
-        input: evt.summary || {},
-        output: null,
-        errorText: null,
-      });
-    } else if (evt.phase === "finish") {
-      const idx = toolStarts.get(key);
-      if (idx !== undefined) {
-        result[idx] = {
-          ...result[idx],
-          state: evt.ok ? "completed" : "error",
-          output: evt.result !== undefined ? evt.result : null,
-          errorText: !evt.ok && evt.error ? evt.error : null,
-        };
-        toolStarts.delete(key);
-      }
-    }
-  }
-
-  // Live agent status while streaming
-  if (props.message.agent_status && props.message._streaming) {
-    result.push({
-      id: "status-thinking",
-      label: props.message.agent_status,
-      icon: Search,
-      state: "running",
-      input: null,
-      output: null,
-      errorText: null,
-    });
-  }
-
-  return result;
-});
-
-// Overall state: running if any step is running, else completed (or error if any error)
-const overallState = computed(() => {
-  const steps = allSteps.value;
-  if (steps.some(s => s.state === "running")) return "running";
-  if (steps.some(s => s.state === "error")) return "error";
-  return "completed";
-});
-
-const failedCount = computed(() => allSteps.value.filter(s => s.state === "error").length);
-
-const headerLabel = computed(() => {
-  const total = allSteps.value.length;
-  const done = allSteps.value.filter(s => s.state === "completed").length;
-  if (overallState.value === "running") return `${total} 个步骤执行中…`;
-  return `${done}/${total} 个步骤已完成`;
-});
-
-// Auto-collapse when answer starts arriving and streaming ends
-const isOpen = ref(true);
-
-watch(
-  () => props.message._streaming,
-  (streaming, was) => {
-    // Collapse once streaming ends AND there is actual answer text
-    if (was && !streaming && props.message.text && props.message.text !== "正在思考...") {
-      isOpen.value = false;
-    }
-  },
+const hasEvents = computed(() =>
+  !!(
+    task.value ||
+    taskToolUses.value.length ||
+    taskApprovals.value.length ||
+    taskEvents.value.length
+  )
 );
 
 function statusIcon(state) {
   return STATUS_ICONS[state] || CircleIcon;
 }
+
 function statusIconClass(state) {
   return STATUS_ICON_CLASSES[state] || "size-4";
 }
+
 function statusLabel(state) {
   return STATUS_LABELS[state] || state;
 }
-function formatInput(input) {
-  if (!input || typeof input !== "object") return "";
-  const parts = Object.entries(input).map(([k, v]) => `${k}: ${v}`);
-  return parts.join(" · ");
+
+function latestApprovalFor(toolUseId) {
+  return [...taskApprovals.value]
+    .filter((item) => String(item.tool_use_id || "") === String(toolUseId || ""))
+    .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")))[0] || null;
 }
-function truncateOutput(output) {
-  if (!output) return "";
-  if (typeof output === "string") return output.length > 120 ? output.slice(0, 120) + "…" : output;
-  const s = JSON.stringify(output);
-  return s.length > 120 ? s.slice(0, 120) + "…" : s;
+
+function mapToolState(toolUse) {
+  const latestApproval = latestApprovalFor(toolUse.tool_use_id);
+  if (latestApproval?.status === "rejected") return "output-denied";
+  if (toolUse.status === "failed") return "output-error";
+  if (toolUse.status === "completed") return "output-available";
+  if (
+    latestApproval?.status === "pending"
+    || (task.value?.status === "requires_action" && task.value?.pending_tool_use_id === toolUse.tool_use_id)
+  ) {
+    return "approval-requested";
+  }
+  if (latestApproval?.status === "approved") return "approval-responded";
+  return "input-available";
 }
+
+function toolTimestamp(toolUse) {
+  return String(toolUse.started_at || toolUse.updated_at || toolUse.finished_at || "");
+}
+
+function hasObjectKeys(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0;
+}
+
+function toolInputValue(toolUse) {
+  if (hasObjectKeys(toolUse.raw_input)) return toolUse.raw_input;
+  if (hasObjectKeys(toolUse.input_summary)) return toolUse.input_summary;
+  return toolUse.raw_input ?? toolUse.input_summary ?? {};
+}
+
+function toolErrorText(toolUse) {
+  const error = toolUse.error;
+  if (typeof error === "string") return error;
+  if (!error || typeof error !== "object") return "";
+  return error.message || error.detail || JSON.stringify(error);
+}
+
+function toolOutputValue(toolUse) {
+  if (toolUse.raw_output !== undefined) return toolUse.raw_output;
+  return null;
+}
+
+const renderedTools = computed(() =>
+  [...taskToolUses.value]
+    .sort((a, b) => toolTimestamp(a).localeCompare(toolTimestamp(b)))
+    .map((toolUse) => ({
+      ...toolUse,
+      title: TOOL_LABEL_MAP[toolUse.tool_name] || toolUse.tool_name || "工具调用",
+      state: mapToolState(toolUse),
+      input: toolInputValue(toolUse),
+      output: toolOutputValue(toolUse),
+      errorText: toolErrorText(toolUse),
+      sortTimestamp: toolTimestamp(toolUse),
+      sortOrder: 0,
+    }))
+);
+
+const renderedSkills = computed(() => {
+  const items = [];
+  const orderedEvents = [...skillTaskEvents.value];
+  for (let index = 0; index < orderedEvents.length; index += 1) {
+    const event = orderedEvents[index];
+    const payload = event.payload || {};
+    const phase = String(payload.phase || "").trim().toLowerCase();
+    const name = String(payload.name || "skill").trim() || "skill";
+    const timestamp = String(event.created_at || "");
+    const existing = [...items]
+      .reverse()
+      .find((item) => item.skillName === name && item.isOpen);
+
+    if (phase === "start" || !existing) {
+      items.push({
+        tool_use_id: event.event_id || `skill-${name}-${index}`,
+        tool_name: "skill",
+        title: `读取技能: ${name}`,
+        state:
+          phase === "loaded" ? "output-available"
+          : phase === "blocked" || phase === "error" ? "output-error"
+          : phase === "approval_required" ? "approval-requested"
+          : "input-available",
+        input: { name },
+        output:
+          phase === "loaded"
+            ? {
+                skill_root: payload.skill_root || "",
+                resource_count: Number(payload.resource_count || 0),
+              }
+            : null,
+        errorText: phase === "blocked" || phase === "error" || phase === "approval_required"
+          ? (payload.error || "")
+          : "",
+        sortTimestamp: timestamp,
+        sortOrder: index + 10000,
+        skillName: name,
+        isOpen: phase !== "loaded" && phase !== "blocked" && phase !== "error",
+      });
+      continue;
+    }
+
+    existing.state =
+      phase === "loaded" ? "output-available"
+      : phase === "blocked" || phase === "error" ? "output-error"
+      : phase === "approval_required" ? "approval-requested"
+      : existing.state;
+    existing.output =
+      phase === "loaded"
+        ? {
+            skill_root: payload.skill_root || "",
+            resource_count: Number(payload.resource_count || 0),
+          }
+        : existing.output;
+    existing.errorText =
+      phase === "blocked" || phase === "error" || phase === "approval_required"
+        ? (payload.error || "")
+        : existing.errorText;
+    existing.sortTimestamp = timestamp || existing.sortTimestamp;
+    existing.sortOrder = index + 10000;
+    existing.isOpen = phase !== "loaded" && phase !== "blocked" && phase !== "error";
+  }
+
+  return items.map(({ skillName, isOpen, ...item }) => item);
+});
+
+const renderedActivities = computed(() =>
+  [...renderedTools.value, ...renderedSkills.value]
+    .sort((a, b) => {
+      const timeCompare = String(a.sortTimestamp || "").localeCompare(String(b.sortTimestamp || ""));
+      if (timeCompare !== 0) return timeCompare;
+      return Number(a.sortOrder || 0) - Number(b.sortOrder || 0);
+    })
+);
+
+const auxiliaryEvents = computed(() => {
+  const items = [];
+
+  const commandFailures = taskEvents.value.filter((item) => item.event_type === "command_failed");
+  for (const event of commandFailures) {
+    const payload = event.payload || {};
+    items.push({
+      id: event.event_id || `cmd-${payload.command || ""}`,
+      label: `命令失败 (第 ${payload.retry_count || 1} 次)`,
+      body: payload.stderr || payload.command || "",
+      icon: Terminal,
+      state: "error",
+    });
+  }
+
+  return items;
+});
+
+const taskSummary = computed(() => {
+  if (!task.value) return null;
+  return {
+    phaseLabel: PHASE_LABEL_MAP[task.value.phase] || task.value.phase || "unknown",
+    retryCount: task.value.retry_count || 0,
+    errorText: task.value.failure_reason || "",
+  };
+});
+
+const overallState = computed(() => {
+  if (task.value?.status === "failed" || task.value?.status === "cancelled") return "error";
+  if (task.value?.status === "completed") return "completed";
+  const activityStates = renderedActivities.value.map((item) => item.state);
+  if (activityStates.some((state) => state === "approval-requested")) return "pending";
+  if (auxiliaryEvents.value.some((item) => item.state === "pending")) return "pending";
+  if (task.value?.status === "requires_action") return "pending";
+  if (activityStates.some((state) => ["input-available", "input-streaming", "approval-responded"].includes(state))) return "running";
+  if (auxiliaryEvents.value.some((item) => item.state === "running")) return "running";
+  if (task.value?.status === "running" || task.value?.status === "queued") return "running";
+  if (activityStates.some((state) => ["output-error", "output-denied"].includes(state))) return "error";
+  if (auxiliaryEvents.value.some((item) => item.state === "error")) return "error";
+  return "completed";
+});
+
+const completedActivityCount = computed(() =>
+  renderedActivities.value.filter((item) => item.state === "output-available").length
+);
+
+const failedActivityCount = computed(() =>
+  renderedActivities.value.filter((item) => ["output-error", "output-denied"].includes(item.state)).length
+);
+
+const failedCount = computed(() =>
+  failedActivityCount.value
+  + auxiliaryEvents.value.filter((item) => item.state === "error").length
+);
+
+const headerLabel = computed(() => {
+  if (!renderedActivities.value.length) return "Agent 活动";
+  if (renderedActivities.value.some((item) => item.state === "approval-requested")) {
+    return `等待审批 · ${renderedActivities.value.length} 个执行步骤`;
+  }
+  if (overallState.value === "running") return `${renderedActivities.value.length} 个执行步骤执行中…`;
+  if (failedActivityCount.value > 0) {
+    return `${failedActivityCount.value} 个步骤失败 · ${completedActivityCount.value}/${renderedActivities.value.length} 已完成`;
+  }
+  return `${completedActivityCount.value}/${renderedActivities.value.length} 个执行步骤已完成`;
+});
+
+const isOpen = ref(true);
+
+watch(
+  () => props.message._streaming,
+  (streaming, was) => {
+    if (was && !streaming && props.message.text && props.message.text !== "正在思考...") {
+      isOpen.value = false;
+    }
+  },
+);
 </script>
