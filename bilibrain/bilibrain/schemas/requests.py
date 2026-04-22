@@ -43,3 +43,23 @@ class SettingsRequest(BaseModel):
 
 class TagsRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
+
+
+class ModelSettingsRequest(BaseModel):
+    llm_model: str = Field(..., min_length=1)
+    dashscope_api_key: str = Field(..., min_length=1)
+    dashscope_base_url: str = Field(default="")
+    embedding_model: str = Field(default="")
+    ollama_base_url: str = Field(default="")
+    asr_api_model: str = Field(default="")
+    asr_api_base_url: str = Field(default="")
+
+
+class ModelSettingsResponse(BaseModel):
+    llm_model: str
+    dashscope_api_key: str
+    dashscope_base_url: str
+    embedding_model: str
+    ollama_base_url: str
+    asr_api_model: str
+    asr_api_base_url: str
