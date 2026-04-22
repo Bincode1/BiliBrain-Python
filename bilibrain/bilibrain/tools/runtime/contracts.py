@@ -13,6 +13,8 @@ class RuntimeExecRequest:
     cwd: str = "."
     timeout_seconds: int = 30
     env: dict[str, str] = field(default_factory=dict)
+    script_body: str | None = None
+    script_shell: str | None = None
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,8 @@ class BaseToolRuntime(ABC):
         cwd: str = ".",
         timeout_seconds: int = 30,
         env: dict[str, str] | None = None,
+        script_body: str | None = None,
+        script_shell: str | None = None,
     ) -> RuntimeExecResult:
         raise NotImplementedError
 

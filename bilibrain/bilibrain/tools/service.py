@@ -1,5 +1,6 @@
 from __future__ import annotations
 import shutil
+import shlex
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -31,6 +32,8 @@ class ToolService:
         *,
         workspace_base_root: Path,
         runtime=None,
+        local_runtime=None,
+        local_command_prefixes: tuple[tuple[str, ...], ...] | list[list[str]] | None = None,
         registry: dict[str, ToolRegistryItem] | None = None,
         policy: ToolPolicy | None = None,
         db: Any | None = None,
@@ -38,6 +41,8 @@ class ToolService:
     ) -> None:
         self.workspace_base_root = Path(workspace_base_root)
         self.runtime = runtime
+        self.local_runtime = local_runtime
+        self.local_command_prefixes = _normalize_command_prefixes(local_command_prefixes or ())
         self.registry = registry or build_default_tool_registry()
         self.policy = policy or ToolPolicy()
         self.db = db
@@ -76,7 +81,8 @@ class ToolService:
     async def list_workspaces(
         self, *, feature_name: str | None = None, limit: int = 100
     ) -> list[dict[str, Any]]:
-        if feature_name and str(feature_name).strip() != "workspace":
+        normalized_feature_name = str(feature_name or "").strip().lower()
+        if normalized_feature_name and normalized_feature_name not in {"workspace", "tools"}:
             return []
         workspace = await self.get_or_create_default_workspace()
         return [
@@ -160,12 +166,18 @@ class ToolService:
         normalized_workspace_id = str(workspace_id or "").strip() or "default"
         if normalized_workspace_id != "default":
             raise WorkspaceError("Only the default workspace is supported.")
+        normalized_actor = str(actor or "").strip() or "system"
+        resolved_approval_mode = (
+            ToolApprovalMode.PREAPPROVED
+            if normalized_actor.lower() == "workbench" and approval_mode == ToolApprovalMode.AUTO
+            else approval_mode
+        )
         request = ToolCallRequest(
             workspace_id=normalized_workspace_id,
             tool_name=tool_name,
             arguments=arguments,
-            actor=actor,
-            approval_mode=approval_mode,
+            actor=normalized_actor,
+            approval_mode=resolved_approval_mode,
             trace_id=resolved_trace_id,
         )
         item = self.registry.get(request.tool_name)
@@ -202,9 +214,10 @@ class ToolService:
             "trace_id": request.trace_id,
         }
         if item.runtime_required:
-            if self.runtime is None:
+            runtime = self._resolve_runtime(request)
+            if runtime is None:
                 raise RuntimeError("Runtime is not configured for this tool.")
-            kwargs["runtime"] = self.runtime
+            kwargs["runtime"] = runtime
 
         result = await item.handler(**kwargs)
         final_result = result.model_copy(update={"duration_ms": timer.elapsed_ms()})
@@ -234,13 +247,62 @@ class ToolService:
                 requires_approval=bool(self.policy.approval_required_for_write),
                 reason="Write tool requires preapproval under the current policy.",
             )
+        if request.tool_name == "obsidian_write_note":
+            return ToolPolicyDecision(
+                allowed=True,
+                requires_approval=True,
+                reason="Writing into the Obsidian vault requires explicit approval.",
+            )
         if request.tool_name != "run_command":
             return ToolPolicyDecision(
                 allowed=True, requires_approval=False, reason="Tool allowed."
             )
         return evaluate_command_request(
-            self.policy, str(request.arguments.get("command") or "")
+            self.policy,
+            str(request.arguments.get("command") or ""),
+            script_body=str(request.arguments.get("script_body") or "") or None,
         )
+
+    def _resolve_runtime(self, request: ToolCallRequest):
+        if request.tool_name != "run_command":
+            return self.runtime
+        if not self._should_use_local_runtime(str(request.arguments.get("command") or "")):
+            return self.runtime
+        if self.local_runtime is None:
+            raise RuntimeError(
+                "This command prefix is configured for local_dev execution, but no local runtime is available."
+            )
+        return self.local_runtime
+
+    def _should_use_local_runtime(self, command: str) -> bool:
+        if not self.local_command_prefixes:
+            return False
+        parts = _command_parts(command)
+        if not parts:
+            return False
+        return any(_starts_with(parts, prefix) for prefix in self.local_command_prefixes)
+
+
+def _normalize_command_prefixes(prefixes) -> list[list[str]]:
+    normalized: list[list[str]] = []
+    for prefix in prefixes:
+        parts = [str(part or "").strip() for part in prefix if str(part or "").strip()]
+        if parts:
+            normalized.append(parts)
+    return normalized
+
+
+def _command_parts(command: str) -> list[str]:
+    try:
+        return shlex.split(str(command or ""), posix=False)
+    except ValueError:
+        return str(command or "").split()
+
+
+def _starts_with(parts: list[str], prefix: list[str]) -> bool:
+    if not prefix or len(parts) < len(prefix):
+        return False
+    return parts[: len(prefix)] == prefix
 
 
 def create_tool_service(settings, db) -> ToolService:
@@ -248,15 +310,16 @@ def create_tool_service(settings, db) -> ToolService:
     from bilibrain.tools.runtime.docker_sandbox import DockerSandboxRuntime
     from bilibrain.tools.runtime.local_dev import LocalDevRuntime
 
-    runtime = None
+    default_runtime = None
+    local_runtime = LocalDevRuntime(
+        max_stdout_bytes=settings.tools_max_stdout_bytes,
+        max_stderr_bytes=settings.tools_max_stderr_bytes,
+    )
     runtime_name = str(settings.tools_runtime or "").strip().lower()
     if runtime_name == "local_dev":
-        runtime = LocalDevRuntime(
-            max_stdout_bytes=settings.tools_max_stdout_bytes,
-            max_stderr_bytes=settings.tools_max_stderr_bytes,
-        )
+        default_runtime = local_runtime
     elif runtime_name == "docker_sandbox":
-        runtime = DockerSandboxRuntime(
+        default_runtime = DockerSandboxRuntime(
             config=DockerSandboxConfig(
                 image=settings.tools_docker_image,
                 user=settings.tools_docker_user,
@@ -276,7 +339,9 @@ def create_tool_service(settings, db) -> ToolService:
 
     return ToolService(
         workspace_base_root=settings.tools_workspace_root,
-        runtime=runtime,
+        runtime=default_runtime,
+        local_runtime=local_runtime,
+        local_command_prefixes=getattr(settings, "tools_local_command_prefixes", ()),
         policy=build_tool_policy(settings),
         db=db,
         enabled=bool(settings.tools_enabled),

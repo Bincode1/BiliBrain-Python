@@ -98,8 +98,8 @@ const currentAction = computed(() => {
 const isSkillAction = computed(() => currentAction.value?.name === "skill");
 const currentSkillSummary = computed(() => currentAction.value?.summary || {});
 const isBlockedAction = computed(() => Boolean(currentAction.value?.policy_blocked));
-const usesFilePath = computed(() => ["write_file", "append_file", "make_dir"].includes(currentAction.value?.name || ""));
-const usesContent = computed(() => ["write_file", "append_file"].includes(currentAction.value?.name || ""));
+const usesFilePath = computed(() => ["write_file", "append_file", "make_dir", "obsidian_write_note", "obsidian_read_note"].includes(currentAction.value?.name || ""));
+const usesContent = computed(() => ["write_file", "append_file", "obsidian_write_note"].includes(currentAction.value?.name || ""));
 const skillAllowedToolsText = computed(() => {
   const tools = currentSkillSummary.value?.allowed_tools;
   return Array.isArray(tools) && tools.length ? tools.join(", ") : "";

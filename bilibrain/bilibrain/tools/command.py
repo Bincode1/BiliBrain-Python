@@ -20,12 +20,16 @@ async def run_command_tool(
     cwd = str(arguments.get("cwd") or ".")
     timeout_seconds = max(int(arguments.get("timeout_seconds") or 30), 1)
     env = arguments.get("env") or {}
+    script_body = str(arguments.get("script_body") or "") or None
+    script_shell = str(arguments.get("script_shell") or "").strip() or None
     result = await runtime.exec(
         workspace_root=workspace_root,
         command=command,
         cwd=cwd,
         timeout_seconds=timeout_seconds,
         env=env,
+        script_body=script_body,
+        script_shell=script_shell,
     )
     return ToolCallResult(
         ok=result.exit_code == 0 and not result.timed_out,
@@ -40,6 +44,8 @@ async def run_command_tool(
             "stderr": result.stderr,
             "timed_out": result.timed_out,
             "duration_ms": result.duration_ms,
+            "script_shell": script_shell,
+            "used_script_body": bool(script_body),
         },
         duration_ms=timer.elapsed_ms(),
     )

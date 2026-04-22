@@ -106,11 +106,15 @@
               <label class="text-[10px] uppercase tracking-wider text-muted-foreground">超时（秒）</label>
               <Input v-model.number="form.timeoutSeconds" type="number" min="1" />
             </div>
+            <div v-if="usesVaultName" class="flex flex-col gap-1">
+              <label class="text-[10px] uppercase tracking-wider text-muted-foreground">Vault 名称（可选）</label>
+              <Input v-model="form.vaultName" placeholder="留空表示当前活动 Vault" />
+            </div>
           </div>
 
           <div v-if="usesContent" class="flex flex-col gap-1">
             <label class="text-[10px] uppercase tracking-wider text-muted-foreground">内容</label>
-            <Textarea v-model="form.content" placeholder="写入到当前工作区文件中的正文..." rows="3" />
+            <Textarea v-model="form.content" :placeholder="contentPlaceholder" rows="5" />
           </div>
 
           <div v-if="usesOverwrite" class="flex items-center gap-2">
@@ -157,26 +161,45 @@ const infoText = ref("");
 const refreshingPanel = computed(() => loadingTools.value || loadingWorkspaces.value);
 
 const workspaceForm = reactive({ featureName: "tools", title: "工具沙箱" });
-const form = reactive({ path: ".", encoding: "utf-8", command: "python -V", cwd: ".", timeoutSeconds: 30, query: "东京 5 日 旅行 攻略", maxResults: 5, content: "", overwrite: true });
+const form = reactive({ path: ".", encoding: "utf-8", command: "python -V", cwd: ".", timeoutSeconds: 30, query: "东京 5 日 旅行 攻略", maxResults: 5, content: "", overwrite: true, vaultName: "" });
 
 const selectedToolMeta = computed(() => availableTools.value.find((i) => i.name === selectedToolName.value) || null);
-const usesPath = computed(() => ["list_dir", "read_file", "write_file", "append_file", "make_dir"].includes(selectedToolName.value));
+const usesPath = computed(() => ["list_dir", "read_file", "write_file", "append_file", "make_dir", "obsidian_write_note", "obsidian_read_note"].includes(selectedToolName.value));
 const usesEncoding = computed(() => ["read_file", "write_file", "append_file"].includes(selectedToolName.value));
-const usesContent = computed(() => ["write_file", "append_file"].includes(selectedToolName.value));
+const usesContent = computed(() => ["write_file", "append_file", "obsidian_write_note"].includes(selectedToolName.value));
 const usesCommand = computed(() => selectedToolName.value === "run_command");
 const usesCwd = computed(() => selectedToolName.value === "run_command");
-const usesTimeout = computed(() => selectedToolName.value === "run_command");
+const usesTimeout = computed(() => ["run_command", "obsidian_write_note", "obsidian_read_note"].includes(selectedToolName.value));
 const usesQuery = computed(() => selectedToolName.value === "web_search");
 const usesMaxResults = computed(() => selectedToolName.value === "web_search");
-const usesOverwrite = computed(() => selectedToolName.value === "write_file");
-const pathPlaceholder = computed(() => selectedToolName.value === "make_dir" ? "sandbox/output" : "notes.txt");
+const usesOverwrite = computed(() => ["write_file", "obsidian_write_note"].includes(selectedToolName.value));
+const usesVaultName = computed(() => ["obsidian_write_note", "obsidian_read_note"].includes(selectedToolName.value));
+const pathPlaceholder = computed(() => {
+  if (selectedToolName.value === "make_dir") return "sandbox/output";
+  if (selectedToolName.value === "obsidian_write_note" || selectedToolName.value === "obsidian_read_note") return "BiliBrain/notes/demo.md";
+  return "notes.txt";
+});
+const contentPlaceholder = computed(() =>
+  selectedToolName.value === "obsidian_write_note"
+    ? "---\ntitle: Demo\ndate: 2026-04-20\n---\n\n## 视频主旨\n这里是测试笔记。"
+    : "写入到当前工作区文件中的正文..."
+);
 const canExecute = computed(() => Boolean(workspace.value?.workspace_id) && Boolean(selectedToolName.value) && !runningTool.value);
 
 watch(selectedToolName, (toolName) => {
-  const defaults = { list_dir: ".", read_file: "notes.txt", write_file: "notes.txt", append_file: "notes.txt", make_dir: "sandbox/output" };
+  const defaults = {
+    list_dir: ".",
+    read_file: "notes.txt",
+    write_file: "notes.txt",
+    append_file: "notes.txt",
+    make_dir: "sandbox/output",
+    obsidian_write_note: "BiliBrain/notes/demo.md",
+    obsidian_read_note: "BiliBrain/notes/demo.md",
+  };
   if (defaults[toolName]) form.path = defaults[toolName];
   if (toolName === "write_file" && !form.content) form.content = "Hello from BiliBrain tools.";
   if (toolName === "append_file" && !form.content) form.content = "\nAppended line.";
+  if (toolName === "obsidian_write_note" && !form.content) form.content = "---\ntitle: Demo\ndate: 2026-04-20\n---\n\n## 视频主旨\n这里是测试笔记。";
 }, { immediate: true });
 
 async function refreshTools() {
@@ -223,6 +246,8 @@ function buildArguments() {
   if (selectedToolName.value === "read_file") return { path: form.path || "", encoding: form.encoding || "utf-8" };
   if (selectedToolName.value === "write_file") return { path: form.path || "", encoding: form.encoding || "utf-8", content: form.content || "", overwrite: Boolean(form.overwrite) };
   if (selectedToolName.value === "append_file") return { path: form.path || "", encoding: form.encoding || "utf-8", content: form.content || "" };
+  if (selectedToolName.value === "obsidian_write_note") return { path: form.path || "", content: form.content || "", overwrite: Boolean(form.overwrite), vault_name: form.vaultName || "", timeout_seconds: Number(form.timeoutSeconds) || 30 };
+  if (selectedToolName.value === "obsidian_read_note") return { path: form.path || "", vault_name: form.vaultName || "", timeout_seconds: Number(form.timeoutSeconds) || 15 };
   if (selectedToolName.value === "make_dir") return { path: form.path || "", parents: true, exist_ok: true };
   if (selectedToolName.value === "web_search") return { query: form.query || "", max_results: Number(form.maxResults) || 5 };
   return { command: form.command || "", cwd: form.cwd || ".", timeout_seconds: Number(form.timeoutSeconds) || 30 };
@@ -232,7 +257,7 @@ async function handleRunTool() {
   if (!workspace.value?.workspace_id) { errorText.value = "请先创建或选择一个工作区。"; return; }
   runningTool.value = true; errorText.value = ""; latestResult.value = null;
   try {
-    latestResult.value = await callTool({ workspace_id: workspace.value.workspace_id, tool_name: selectedToolName.value, arguments: buildArguments(), actor: "workbench", approval_mode: "auto" });
+    latestResult.value = await callTool({ workspace_id: workspace.value.workspace_id, tool_name: selectedToolName.value, arguments: buildArguments(), actor: "workbench", approval_mode: "preapproved" });
     infoText.value = `${selectedToolName.value} completed.`;
   } catch (e) { errorText.value = e.message || "工具执行失败。"; }
   finally { runningTool.value = false; }

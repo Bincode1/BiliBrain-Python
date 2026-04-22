@@ -32,7 +32,11 @@ class DockerSandboxRuntime(BaseToolRuntime):
         cwd: str = ".",
         timeout_seconds: int = 30,
         env: dict[str, str] | None = None,
+        script_body: str | None = None,
+        script_shell: str | None = None,
     ) -> RuntimeExecResult:
+        if str(script_body or "").strip():
+            raise RuntimeError("Docker sandbox runtime does not support script_body mode.")
         workspace_path = ensure_workspace_exists(workspace_root)
         target_cwd = normalize_workspace_path(workspace_root, cwd)
         timer = RuntimeTimer()

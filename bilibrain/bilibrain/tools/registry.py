@@ -7,6 +7,7 @@ from bilibrain.tools.browser_read import browser_read_page_tool
 from bilibrain.tools.command import run_command_tool
 from bilibrain.tools.contracts import ToolApprovalMode, ToolCapability, ToolDefinition
 from bilibrain.tools.filesystem import append_file_tool, list_dir_tool, make_dir_tool, read_file_tool, write_file_tool
+from bilibrain.tools.obsidian import obsidian_read_note_tool, obsidian_write_note_tool
 from bilibrain.tools.web_search import web_search_tool
 
 
@@ -95,6 +96,24 @@ def build_default_tool_registry() -> dict[str, ToolRegistryItem]:
             ),
             handler=browser_read_page_tool,
             runtime_required=True,
+        ),
+        ToolRegistryItem(
+            definition=ToolDefinition(
+                name="obsidian_write_note",
+                description="Write a Markdown note into the active Obsidian vault using an exact vault-relative path and verify the result.",
+                capabilities=(ToolCapability.EXTERNAL_NOTIFY,),
+                approval_mode=ToolApprovalMode.REQUIRE_APPROVAL,
+            ),
+            handler=obsidian_write_note_tool,
+        ),
+        ToolRegistryItem(
+            definition=ToolDefinition(
+                name="obsidian_read_note",
+                description="Read a Markdown note from the active Obsidian vault using an exact vault-relative path.",
+                capabilities=(ToolCapability.EXTERNAL_NOTIFY,),
+                approval_mode=ToolApprovalMode.AUTO,
+            ),
+            handler=obsidian_read_note_tool,
         ),
     ]
     return {item.definition.name: item for item in items}
