@@ -43,6 +43,7 @@ async def update_model_settings(
     updates = {
         _ENV_KEY_MAP[field]: value
         for field, value in payload.model_dump().items()
+        if field in _ENV_KEY_MAP
     }
     await write_env(updates)
     return {"ok": True, "restart_required": True}
