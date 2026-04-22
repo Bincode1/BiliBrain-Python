@@ -10,8 +10,8 @@ from typing import Any, Callable
 
 from langchain_core.tools import tool
 
-from bilibrain.graphs.qa.helpers import (
-    build_sources,
+from bilibrain.services.retrieval_support import (
+    build_chunk_sources,
     filter_indexed_hits,
     should_reduce_summary_documents,
 )
@@ -44,9 +44,9 @@ def build_qa_retrieval_tools(
     @tool(
         "search_knowledge_base",
         description=(
-            "搜索视频知识库，返回与查询相关的具体内容片段。"
-            "适用于：查具体细节、事实、步骤、定义、时间点。"
-            "返回带编号的资料列表，回答时用【n】引用编号。"
+            "搜索当前视频知识库范围内的 chunk 级内容片段。"
+            "适用于具体事实、定义、步骤、例子、代码、命令、时间点、原话等细节问题。"
+            "必须先拿到真实返回内容再下结论；返回条目带 [n] 编号、视频标题、UP、时间点和片段正文，回答时按 [n] 引用。"
         ),
     )
     async def search_knowledge_base(query: str) -> str:
@@ -76,7 +76,7 @@ def build_qa_retrieval_tools(
             matches = rerank_search_hits(query=query, hits=filtered, limit=rerank_top_k)
 
             # 5. Build sources and context text
-            sources = build_sources(matches, limit=20)
+            sources = build_chunk_sources(matches, limit=20)
             lines = []
             for idx, item in enumerate(matches, start=1):
                 lines.append(
@@ -98,9 +98,9 @@ def build_qa_retrieval_tools(
     @tool(
         "search_video_summaries",
         description=(
-            "搜索视频摘要，返回收藏夹/范围内视频的概要内容。"
-            "适用于：做总结、概括、归纳、对比、梳理整体观点。"
-            "返回带编号的摘要列表，回答时用【n】引用编号。"
+            "搜索当前视频知识库范围内的视频摘要。"
+            "适用于收藏夹/多视频概览、主题归纳、跨视频对比、学习路线梳理、宏观总结等问题。"
+            "只基于返回的摘要做归纳；返回条目带 [n] 编号、视频标题、UP 和摘要正文，回答时按 [n] 引用。"
         ),
     )
     async def search_video_summaries(query: str) -> str:

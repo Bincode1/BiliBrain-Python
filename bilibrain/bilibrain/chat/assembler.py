@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from bilibrain.chat.paths import get_context_layers_path
-from bilibrain.services.chat_memory import build_conversation_context, read_memory_sections
+from bilibrain.services.chat_memory import build_conversation_context
 from bilibrain.services.common import estimate_text_tokens
 from bilibrain.services.workspace_context import select_workspace_context
 
@@ -23,7 +23,6 @@ class AssembledContext:
     messages: list[Any]
     selected_live_prefix_message_ids: list[int]
     selected_recent_message_ids: list[int]
-    selected_memory_section_ids: list[str]
     selected_workspace_state_keys: list[str]
     token_estimates: dict[str, int]
     final_message_count: int
@@ -68,85 +67,25 @@ def _history_to_messages(
     return messages, selected_ids, history_token_estimate
 
 
-def _query_terms(query: str) -> set[str]:
-    normalized = str(query or "").lower()
-    terms: set[str] = set()
-    for raw in normalized.replace("，", " ").replace("。", " ").split():
-        token = raw.strip(" -:：,.;；、()[]{}<>\"'`")
-        if len(token) >= 2:
-            terms.add(token)
-    return terms
-
-
-def _score_memory_section(section: dict[str, Any], query_terms: set[str]) -> int:
-    score = 0
-    section_type = str(section.get("type") or "").strip().lower()
-    if section_type in {"active_goal", "active_scope"}:
-        score += 2
-    elif section_type == "recent_progress":
-        score += 2
-    elif section_type == "confirmed_fact":
-        score += 1
-
-    content = str(section.get("content") or "").lower()
-    keywords = [str(item or "").lower() for item in list(section.get("keywords") or [])]
-    for term in query_terms:
-        if term in content:
-            score += 3
-        elif any(term in keyword or keyword in term for keyword in keywords if keyword):
-            score += 3
-    return score
-
-
-def _select_memory_sections(
-    sections: list[dict[str, Any]],
-    *,
-    query: str,
-    limit: int = 5,
-) -> list[dict[str, Any]]:
-    query_terms = _query_terms(query)
-    scored: list[tuple[int, int, dict[str, Any]]] = []
-    for index, section in enumerate(sections):
-        score = _score_memory_section(section, query_terms)
-        if score <= 0:
-            continue
-        scored.append((score, -index, section))
-    scored.sort(reverse=True)
-    return [item[2] for item in scored[: max(int(limit), 1)]]
-
-
-def _format_memory_sections_for_prompt(sections: list[dict[str, Any]]) -> str:
-    lines: list[str] = []
-    for section in sections:
-        section_type = str(section.get("type") or "").strip()
-        content = str(section.get("content") or "").strip()
-        if not content:
-            continue
-        lines.append(f"[{section_type}] {content}")
-    return "\n".join(lines).strip()
-
-
 async def assemble_unified_agent_context(
     runtime: Runtime,
     *,
     conversation_id: int,
     query: str,
     system_prompt_builder: Callable[[str], str],
+    system_context_builder: Callable[[str], str | None] | None = None,
 ) -> AssembledContext:
     context = await build_conversation_context(
         runtime,
         conversation_id=conversation_id,
     )
-    memory_sections = await read_memory_sections(
-        runtime,
-        conversation_id=conversation_id,
-    )
-    selected_memory_sections = _select_memory_sections(
-        memory_sections,
-        query=query,
-    )
-    memory_text = _format_memory_sections_for_prompt(selected_memory_sections)
+    memory_text = str(context.memory_text or "").strip()
     system_prompt = system_prompt_builder(memory_text)
+    system_context_prompt = (
+        str(system_context_builder(memory_text) or "").strip()
+        if system_context_builder is not None
+        else ""
+    )
     workspace_context = await select_workspace_context(
         runtime,
         query=query,
@@ -158,6 +97,8 @@ async def assemble_unified_agent_context(
         context.recent_history,
     )
     messages: list[Any] = [SystemMessage(content=system_prompt)]
+    if system_context_prompt:
+        messages.append(SystemMessage(content=system_context_prompt))
     if workspace_context.prompt_text:
         messages.append(
             SystemMessage(
@@ -178,32 +119,28 @@ async def assemble_unified_agent_context(
         if not isinstance(last_message, HumanMessage) or last_content != normalized_query:
             messages.append(HumanMessage(content=normalized_query))
     system_token_estimate = estimate_text_tokens(system_prompt)
+    system_context_token_estimate = estimate_text_tokens(system_context_prompt)
     memory_token_estimate = estimate_text_tokens(memory_text)
     token_estimates = {
         "system": system_token_estimate,
+        "system_context": system_context_token_estimate,
         "live_prefix": live_prefix_token_estimate,
         "recent_history": recent_token_estimate,
-        "memory_sections": memory_token_estimate,
+        "memory_text": memory_token_estimate,
         "workspace_state": workspace_context.token_estimate,
         "total": system_token_estimate
+        + system_context_token_estimate
         + live_prefix_token_estimate
         + recent_token_estimate
         + memory_token_estimate
         + workspace_context.token_estimate,
     }
-    selected_memory_section_ids = [
-        str(item.get("section_id") or "").strip()
-        for item in selected_memory_sections
-        if str(item.get("section_id") or "").strip()
-    ]
-
     snapshot = {
         "conversation_id": int(conversation_id),
         "query": str(query or ""),
         "assembled_at": _now_text(),
         "selected_live_prefix_message_ids": selected_live_prefix_ids,
         "selected_recent_message_ids": selected_recent_ids,
-        "selected_memory_section_ids": selected_memory_section_ids,
         "selected_workspace_state_keys": workspace_context.selected_keys,
         "token_estimates": token_estimates,
         "final_message_count": len(messages),
@@ -218,7 +155,6 @@ async def assemble_unified_agent_context(
         messages=messages,
         selected_live_prefix_message_ids=selected_live_prefix_ids,
         selected_recent_message_ids=selected_recent_ids,
-        selected_memory_section_ids=selected_memory_section_ids,
         selected_workspace_state_keys=workspace_context.selected_keys,
         token_estimates=token_estimates,
         final_message_count=len(messages),

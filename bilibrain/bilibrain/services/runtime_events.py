@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from uuid import uuid4
 from typing import Any, Callable
 
 from bilibrain.services.chat_storage import (
     append_chat_tool_event,
-    clear_chat_pending_approval,
-    write_chat_pending_approval,
+    append_chat_task_event,
 )
 from bilibrain.services.runtime_state import (
     set_pending_approval_state,
@@ -15,42 +15,12 @@ from bilibrain.services.runtime_state import (
 )
 
 
-async def persist_pending_approval_state(
-    runtime,
-    *,
-    conversation_id: int,
-    session_id: str,
-    workspace_id: str,
-    approval_request: dict[str, Any],
-) -> dict[str, Any]:
-    result = await write_chat_pending_approval(
-        runtime,
-        conversation_id,
-        payload={
-            "session_id": session_id,
-            "workspace_id": workspace_id,
-            "approval_request": approval_request,
-        },
-    )
-    actions = list(approval_request.get("action_requests") or [])
-    first_action = actions[0] if actions and isinstance(actions[0], dict) else {}
-    await set_pending_approval_state(
-        runtime,
-        exists=True,
-        conversation_id=int(conversation_id),
-        workspace_id=str(workspace_id or "default"),
-        action_name=str(first_action.get("name") or "").strip() or None,
-    )
-    return result
-
-
 async def clear_pending_approval_state(
     runtime,
     *,
     conversation_id: int,
     workspace_id: str,
 ) -> None:
-    await clear_chat_pending_approval(runtime, conversation_id)
     await set_pending_approval_state(
         runtime,
         exists=False,
@@ -74,7 +44,7 @@ async def _sync_runtime_state_from_tool_event(
     summary = dict(payload.get("summary") or {})
     state = await read_runtime_state(runtime)
     state["workspace_id"] = str(workspace_id or "default")
-    if tool_name in {"write_file", "append_file", "make_dir"}:
+    if tool_name in {"write_file", "append_file", "make_dir", "obsidian_write_note"}:
         path = str(summary.get("path") or "").strip()
         state["last_write_file"] = {
             "path": path or None,
@@ -114,6 +84,7 @@ async def persist_runtime_event(
     workspace_id: str,
     event_type: str,
     payload: dict[str, Any],
+    task_id: str | None = None,
 ) -> None:
     normalized_type = str(event_type or "").strip().lower()
     event_payload = dict(payload or {})
@@ -125,6 +96,17 @@ async def persist_runtime_event(
         event_type=normalized_type,
         payload=event_payload,
     )
+    normalized_task_id = str(task_id or "").strip()
+    if normalized_task_id:
+        await append_chat_task_event(
+            runtime,
+            int(conversation_id),
+            event_id=f"{normalized_task_id}:{normalized_type}:{uuid4().hex[:8]}",
+            task_id=normalized_task_id,
+            tool_use_id=str(event_payload.get("id") or event_payload.get("tool_use_id") or "").strip() or None,
+            event_type=normalized_type,
+            payload=event_payload,
+        )
     if normalized_type == "tool":
         await _sync_runtime_state_from_tool_event(
             runtime,
@@ -141,6 +123,7 @@ def build_persisting_runtime_event_callback(
     workspace_id: str,
     downstream: Callable[[str, dict[str, Any]], None] | None,
     tasks: list[asyncio.Task[None]],
+    task_id: str | None = None,
 ) -> Callable[[str, dict[str, Any]], None]:
     def emit(event_type: str, data: dict[str, Any] | None = None) -> None:
         payload = dict(data or {})
@@ -154,6 +137,7 @@ def build_persisting_runtime_event_callback(
                         workspace_id=str(workspace_id or "default"),
                         event_type=normalized_type,
                         payload=payload,
+                        task_id=task_id,
                     )
                 )
             )

@@ -1,21 +1,7 @@
 from __future__ import annotations
 
 import logging
-import os
-import sys
 from contextlib import asynccontextmanager
-
-# Ensure NVIDIA CUDA runtime DLLs are discoverable on Windows.
-_cuda_bin_dirs: list[str] = []
-for _pkg in ("nvidia.cublas", "nvidia.cuda_nvrtc"):
-    _prefix = _pkg.replace(".", "/")
-    _candidate = os.path.join(os.path.dirname(__file__), "..", ".venv", "Lib", "site-packages", _prefix.replace("/", os.sep), "bin")
-    if os.path.isdir(_candidate):
-        _cuda_bin_dirs.append(os.path.abspath(_candidate))
-if _cuda_bin_dirs:
-    os.environ["PATH"] = os.pathsep.join(_cuda_bin_dirs + [os.environ.get("PATH", "")])
-
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,8 +33,6 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
     register_exception_handlers(app)
-    
-    # 配置CORS
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://localhost:5174", "http://localhost:5175", "http://localhost:5176"],
@@ -56,7 +40,6 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
     app.include_router(api_router)
 
     assets_dir = settings.frontend_dist_dir / "assets"

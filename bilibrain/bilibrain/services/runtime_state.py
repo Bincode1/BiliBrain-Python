@@ -104,7 +104,7 @@ async def update_runtime_state_from_tool_execution(
     payload = _extract_tool_result_payload(result_str)
     timestamp = _now_text()
 
-    if tool_name in {"write_file", "append_file", "make_dir"}:
+    if tool_name in {"write_file", "append_file", "make_dir", "obsidian_write_note"}:
         path = str(payload.get("path") or tool_args.get("path") or "").strip()
         state["last_write_file"] = {
             "path": path or None,

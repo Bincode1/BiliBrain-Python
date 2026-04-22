@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 from bilibrain.api.deps import get_runtime
 from bilibrain.core.runtime import Runtime
 from bilibrain.schemas.requests import AgentResumeRequest, AskRequest, ChatConversationCreateRequest, ChatConversationRenameRequest
-from bilibrain.services.qa import (
+from bilibrain.services.chat_service import (
     create_chat_conversation,
     delete_chat_conversation,
     get_chat_history,
@@ -108,6 +108,7 @@ async def agent_resume(
         session_id=payload.session_id,
         decision=payload.decision,
         conversation_id=payload.conversation_id,
+        task_id=payload.task_id,
         folder_id=payload.folder_id,
         bvid=payload.bvid,
         scope_mode=payload.scope_mode,
@@ -126,6 +127,7 @@ async def agent_resume_stream(
             session_id=payload.session_id,
             decision=payload.decision,
             conversation_id=payload.conversation_id,
+            task_id=payload.task_id,
             folder_id=payload.folder_id,
             bvid=payload.bvid,
             scope_mode=payload.scope_mode,

@@ -4,14 +4,17 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
-from bilibrain.ai import EmbeddingClient, QwenClient, WhisperAsrClient
+import aiosqlite
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+from bilibrain.ai import AsrClient, EmbeddingClient, QwenClient
 from bilibrain.chat import ChatStore, create_chat_store
 from bilibrain.core.config import Settings, get_settings
 from bilibrain.db.database import Database
+from bilibrain.graphs.unified_agent import build_unified_agent_graph
 from bilibrain.skills.service import SkillService, create_skill_service
 from bilibrain.db.vector_store import LocalVectorStore
 from bilibrain.services.bilibili import BilibiliClient
-from bilibrain.services.chat_storage import migrate_chat_storage
 from bilibrain.storage import AudioStorageService
 from bilibrain.tools.service import ToolService, create_tool_service
 
@@ -23,7 +26,7 @@ class Runtime:
     bili: BilibiliClient
     embedder: EmbeddingClient
     qwen: QwenClient
-    asr: WhisperAsrClient
+    asr: AsrClient
     audio_storage: AudioStorageService
     vector_store: LocalVectorStore
     chat_store: ChatStore | None = None
@@ -37,6 +40,9 @@ class Runtime:
     reset_limiter: asyncio.Semaphore | None = None
     tool_service: ToolService | None = None
     skill_service: SkillService | None = None
+    agent_checkpoint_conn: aiosqlite.Connection | None = None
+    agent_checkpointer: AsyncSqliteSaver | None = None
+    unified_agent_graph: Any | None = None
 
     def require_chat_store(self) -> ChatStore:
         if self.chat_store is None:
@@ -96,7 +102,7 @@ def create_runtime(settings: Settings | None = None) -> Runtime:
         bili=BilibiliClient(resolved_settings, db),
         embedder=EmbeddingClient(resolved_settings),
         qwen=QwenClient(resolved_settings),
-        asr=WhisperAsrClient(resolved_settings),
+        asr=AsrClient(resolved_settings),
         audio_storage=AudioStorageService(resolved_settings),
         vector_store=LocalVectorStore(resolved_settings),
         chat_store=create_chat_store(resolved_settings),
@@ -133,9 +139,24 @@ async def run_ingestion_dispatcher(
 
 
 async def startup_runtime(runtime: Runtime, *, start_dispatcher: bool = True) -> None:
+    base_data_dir = getattr(
+        runtime.settings,
+        "data_dir",
+        getattr(runtime.settings, "chat_dir", None).parent
+        if getattr(runtime.settings, "chat_dir", None) is not None
+        else None,
+    )
+    if base_data_dir is None:
+        raise RuntimeError("Runtime settings must provide data_dir or chat_dir.")
+    agent_runtime_dir = getattr(
+        runtime.settings,
+        "agent_runtime_dir",
+        base_data_dir / "agent_runtime",
+    )
     runtime.settings.audio_dir.mkdir(parents=True, exist_ok=True)
     runtime.settings.vector_db_dir.mkdir(parents=True, exist_ok=True)
     runtime.settings.chat_dir.mkdir(parents=True, exist_ok=True)
+    agent_runtime_dir.mkdir(parents=True, exist_ok=True)
     runtime.settings.tools_workspace_root.mkdir(parents=True, exist_ok=True)
     runtime.settings.skills_root.mkdir(parents=True, exist_ok=True)
     await runtime.db.ensure_ready()
@@ -143,10 +164,6 @@ async def startup_runtime(runtime: Runtime, *, start_dispatcher: bool = True) ->
         runtime.chat_store = create_chat_store(runtime.settings)
     chat_store = runtime.require_chat_store() if hasattr(runtime, "require_chat_store") else runtime.chat_store
     await chat_store.ensure_ready()
-    await migrate_chat_storage(runtime)
-    drop_legacy_chat_tables = getattr(runtime.db, "drop_legacy_chat_tables", None)
-    if callable(drop_legacy_chat_tables):
-        await drop_legacy_chat_tables()
     runtime.tool_service = create_tool_service(runtime.settings, runtime.db)
     runtime.skill_service = create_skill_service(runtime.settings, runtime.db)
     if runtime.tool_service is not None:
@@ -154,6 +171,13 @@ async def startup_runtime(runtime: Runtime, *, start_dispatcher: bool = True) ->
     # 从数据库加载激活的技能
     if runtime.skill_service:
         await runtime.skill_service._load_active_skills()
+    checkpoint_path = agent_runtime_dir / "langgraph_checkpoints.db"
+    runtime.agent_checkpoint_conn = await aiosqlite.connect(str(checkpoint_path))
+    runtime.agent_checkpointer = AsyncSqliteSaver(runtime.agent_checkpoint_conn)
+    await runtime.agent_checkpointer.setup()
+    runtime.unified_agent_graph = build_unified_agent_graph(
+        checkpointer=runtime.agent_checkpointer,
+    )
     if hasattr(runtime, "require_ingestion_enqueue_lock"):
         runtime.require_ingestion_enqueue_lock()
     elif getattr(runtime, "ingestion_enqueue_lock", None) is None:
@@ -209,6 +233,11 @@ async def shutdown_runtime(runtime: Runtime) -> None:
         await runtime.qwen.close()
         await runtime.asr.close()
         runtime.vector_store.close()
+        if runtime.agent_checkpoint_conn is not None:
+            await runtime.agent_checkpoint_conn.close()
+            runtime.agent_checkpoint_conn = None
+        runtime.agent_checkpointer = None
+        runtime.unified_agent_graph = None
     finally:
         close_db = getattr(runtime.db, "close", None)
         if callable(close_db):

@@ -11,23 +11,29 @@ from bilibrain.chat.context import split_recent_history
 from bilibrain.chat.index import build_index_payload
 from bilibrain.chat.memory import normalize_memory_text
 from bilibrain.chat.models import (
+    ApprovalRecord,
     ChatContextStats,
     ChatIndexEntry,
     ChatMessageRecord,
     ChatSessionMeta,
+    TaskEventRecord,
+    TaskRecord,
+    ToolUseRecord,
 )
 from bilibrain.chat.paths import (
+    get_approvals_path,
     get_artifacts_dir,
     get_chat_root,
     get_context_stats_path,
     get_index_path,
     get_memory_path,
-    get_memory_sections_path,
     get_messages_path,
     get_meta_path,
-    get_pending_approval_path,
     get_session_dir,
     get_sessions_root,
+    get_task_events_path,
+    get_tasks_path,
+    get_tool_uses_path,
     get_tool_events_path,
 )
 
@@ -41,14 +47,86 @@ def _normalize_message_dict(item: dict[str, Any]) -> dict[str, Any]:
     return ChatMessageRecord(
         message_id=int(item["message_id"]),
         conversation_id=int(item["conversation_id"]),
+        task_id=str(item.get("task_id") or "").strip() or None,
         role=str(item.get("role") or "").strip(),
         content=str(item.get("content") or ""),
         sources=sources if isinstance(sources, list) else [],
         created_at=str(item.get("created_at") or "") or None,
+        message_kind=str(item.get("message_kind") or "default").strip() or "default",
         answer_mode=str(item.get("answer_mode") or "").strip().lower() or None,
         route_mode=str(item.get("route_mode") or "").strip().lower() or None,
         updated_at=str(item.get("updated_at") or "").strip() or None,
         version=max(int(item.get("version") or 1), 1),
+    ).to_dict()
+
+
+def _normalize_task_dict(item: dict[str, Any]) -> dict[str, Any]:
+    metadata = item.get("metadata")
+    return TaskRecord(
+        task_id=str(item["task_id"]).strip(),
+        conversation_id=int(item["conversation_id"]),
+        user_message_id=int(item["user_message_id"]) if item.get("user_message_id") is not None else None,
+        assistant_message_id=int(item["assistant_message_id"]) if item.get("assistant_message_id") is not None else None,
+        status=str(item.get("status") or "queued").strip().lower() or "queued",
+        phase=str(item.get("phase") or "preparing").strip().lower() or "preparing",
+        route_mode=str(item.get("route_mode") or "").strip().lower() or None,
+        answer_mode=str(item.get("answer_mode") or "").strip().lower() or None,
+        pending_tool_use_id=str(item.get("pending_tool_use_id") or "").strip() or None,
+        retry_count=max(int(item.get("retry_count") or 0), 0),
+        failure_reason=str(item.get("failure_reason") or "").strip() or None,
+        created_at=str(item.get("created_at") or "") or None,
+        updated_at=str(item.get("updated_at") or "") or None,
+        completed_at=str(item.get("completed_at") or "") or None,
+        metadata=metadata if isinstance(metadata, dict) else {},
+    ).to_dict()
+
+
+def _normalize_tool_use_dict(item: dict[str, Any]) -> dict[str, Any]:
+    input_summary = item.get("input_summary")
+    raw_input = item.get("raw_input")
+    raw_output = item.get("raw_output")
+    error = item.get("error")
+    return ToolUseRecord(
+        tool_use_id=str(item["tool_use_id"]).strip(),
+        task_id=str(item["task_id"]).strip(),
+        tool_name=str(item.get("tool_name") or "").strip(),
+        status=str(item.get("status") or "pending").strip().lower() or "pending",
+        input_summary=input_summary if isinstance(input_summary, dict) else {},
+        raw_input=raw_input if isinstance(raw_input, dict) else {},
+        raw_output=raw_output if isinstance(raw_output, dict) else None,
+        error=error if isinstance(error, dict) else None,
+        request_id=str(item.get("request_id") or "").strip() or None,
+        started_at=str(item.get("started_at") or "") or None,
+        finished_at=str(item.get("finished_at") or "") or None,
+        updated_at=str(item.get("updated_at") or "") or None,
+    ).to_dict()
+
+
+def _normalize_approval_dict(item: dict[str, Any]) -> dict[str, Any]:
+    request_payload = item.get("request_payload")
+    decision_payload = item.get("decision_payload")
+    return ApprovalRecord(
+        approval_id=str(item["approval_id"]).strip(),
+        task_id=str(item["task_id"]).strip(),
+        tool_use_id=str(item["tool_use_id"]).strip(),
+        status=str(item.get("status") or "pending").strip().lower() or "pending",
+        request_payload=request_payload if isinstance(request_payload, dict) else {},
+        decision_payload=decision_payload if isinstance(decision_payload, dict) else None,
+        created_at=str(item.get("created_at") or "") or None,
+        resolved_at=str(item.get("resolved_at") or "") or None,
+        updated_at=str(item.get("updated_at") or "") or None,
+    ).to_dict()
+
+
+def _normalize_task_event_dict(item: dict[str, Any]) -> dict[str, Any]:
+    payload = item.get("payload")
+    return TaskEventRecord(
+        event_id=str(item["event_id"]).strip(),
+        task_id=str(item["task_id"]).strip(),
+        tool_use_id=str(item.get("tool_use_id") or "").strip() or None,
+        event_type=str(item.get("event_type") or "").strip().lower(),
+        payload=payload if isinstance(payload, dict) else {},
+        created_at=str(item.get("created_at") or "") or None,
     ).to_dict()
 
 
@@ -115,6 +193,16 @@ class ChatStore:
             handle.write(json.dumps(payload, ensure_ascii=False))
             handle.write("\n")
             handle.flush()
+
+    async def _write_jsonl_atomic(
+        self,
+        path: Path,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        payload = "\n".join(json.dumps(item, ensure_ascii=False) for item in rows)
+        if payload:
+            payload += "\n"
+        await self._write_text_atomic(path, payload)
 
     async def _write_meta(self, meta: dict[str, Any]) -> dict[str, Any]:
         payload = ChatSessionMeta(
@@ -208,6 +296,14 @@ class ChatStore:
             )
             if not get_messages_path(self.settings, normalized_id).exists():
                 await self._write_text_atomic(get_messages_path(self.settings, normalized_id), "")
+            if not get_tasks_path(self.settings, normalized_id).exists():
+                await self._write_text_atomic(get_tasks_path(self.settings, normalized_id), "")
+            if not get_tool_uses_path(self.settings, normalized_id).exists():
+                await self._write_text_atomic(get_tool_uses_path(self.settings, normalized_id), "")
+            if not get_approvals_path(self.settings, normalized_id).exists():
+                await self._write_text_atomic(get_approvals_path(self.settings, normalized_id), "")
+            if not get_task_events_path(self.settings, normalized_id).exists():
+                await self._write_text_atomic(get_task_events_path(self.settings, normalized_id), "")
             if not get_memory_path(self.settings, normalized_id).exists():
                 await self._write_text_atomic(get_memory_path(self.settings, normalized_id), "")
             await self._sync_index()
@@ -257,7 +353,9 @@ class ChatStore:
         role: str,
         content: str,
         *,
+        task_id: str | None = None,
         sources: list[dict[str, Any]] | None = None,
+        message_kind: str = "default",
         answer_mode: str | None = None,
         route_mode: str | None = None,
         message_id: int | None = None,
@@ -279,11 +377,13 @@ class ChatStore:
                 {
                     "message_id": next_message_id,
                     "conversation_id": normalized_id,
+                    "task_id": str(task_id or "").strip() or None,
                     "role": role,
                     "content": content,
                     "sources": sources or [],
                     "answer_mode": answer_mode,
                     "route_mode": route_mode,
+                    "message_kind": str(message_kind or "default").strip() or "default",
                     "created_at": created_at or now,
                     "updated_at": updated_at or created_at or now,
                     "version": max(int(version or 1), 1),
@@ -305,7 +405,9 @@ class ChatStore:
         *,
         conversation_id: int,
         content: str | None = None,
+        task_id: str | None = None,
         sources: list[dict[str, Any]] | None = None,
+        message_kind: str | None = None,
         answer_mode: str | None = None,
         route_mode: str | None = None,
     ) -> dict[str, Any] | None:
@@ -318,8 +420,12 @@ class ChatStore:
                     continue
                 if content is not None:
                     item["content"] = content
+                if task_id is not None:
+                    item["task_id"] = str(task_id).strip() or None
                 if sources is not None:
                     item["sources"] = sources
+                if message_kind is not None:
+                    item["message_kind"] = str(message_kind).strip() or "default"
                 if answer_mode is not None:
                     item["answer_mode"] = str(answer_mode).strip().lower() or None
                 if route_mode is not None:
@@ -330,10 +436,10 @@ class ChatStore:
                 break
             if target is None:
                 return None
-            payload = "\n".join(json.dumps(item, ensure_ascii=False) for item in messages)
-            if payload:
-                payload += "\n"
-            await self._write_text_atomic(get_messages_path(self.settings, normalized_id), payload)
+            await self._write_jsonl_atomic(
+                get_messages_path(self.settings, normalized_id),
+                messages,
+            )
             meta = await self.get_session(normalized_id)
             if meta is not None:
                 meta["updated_at"] = _now_text()
@@ -368,6 +474,371 @@ class ChatStore:
                 continue
             result.append(item)
         return result
+
+    async def list_tasks(self, conversation_id: int) -> list[dict[str, Any]]:
+        rows = self._read_jsonl(get_tasks_path(self.settings, int(conversation_id)))
+        return [_normalize_task_dict(item) for item in rows]
+
+    async def get_task(
+        self,
+        conversation_id: int,
+        task_id: str,
+    ) -> dict[str, Any] | None:
+        normalized_task_id = str(task_id or "").strip()
+        if not normalized_task_id:
+            return None
+        for item in await self.list_tasks(conversation_id):
+            if str(item.get("task_id") or "").strip() == normalized_task_id:
+                return item
+        return None
+
+    async def append_task(
+        self,
+        conversation_id: int,
+        *,
+        task_id: str,
+        user_message_id: int | None = None,
+        assistant_message_id: int | None = None,
+        status: str = "queued",
+        phase: str = "preparing",
+        route_mode: str | None = None,
+        answer_mode: str | None = None,
+        pending_tool_use_id: str | None = None,
+        retry_count: int = 0,
+        failure_reason: str | None = None,
+        created_at: str | None = None,
+        updated_at: str | None = None,
+        completed_at: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_id = int(conversation_id)
+        async with self._get_lock(normalized_id):
+            if await self.get_session(normalized_id) is None:
+                raise RuntimeError("对话会话不存在，请刷新页面后重试。")
+            now = _now_text()
+            item = _normalize_task_dict(
+                {
+                    "task_id": str(task_id or "").strip(),
+                    "conversation_id": normalized_id,
+                    "user_message_id": user_message_id,
+                    "assistant_message_id": assistant_message_id,
+                    "status": status,
+                    "phase": phase,
+                    "route_mode": route_mode,
+                    "answer_mode": answer_mode,
+                    "pending_tool_use_id": pending_tool_use_id,
+                    "retry_count": retry_count,
+                    "failure_reason": failure_reason,
+                    "created_at": created_at or now,
+                    "updated_at": updated_at or created_at or now,
+                    "completed_at": completed_at,
+                    "metadata": metadata or {},
+                }
+            )
+            await self._append_jsonl(get_tasks_path(self.settings, normalized_id), item)
+            return item
+
+    async def replace_task(
+        self,
+        conversation_id: int,
+        *,
+        task_id: str,
+        user_message_id: int | None = None,
+        assistant_message_id: int | None = None,
+        status: str | None = None,
+        phase: str | None = None,
+        route_mode: str | None = None,
+        answer_mode: str | None = None,
+        pending_tool_use_id: str | None = None,
+        retry_count: int | None = None,
+        failure_reason: str | None = None,
+        completed_at: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        normalized_id = int(conversation_id)
+        normalized_task_id = str(task_id or "").strip()
+        async with self._get_lock(normalized_id):
+            items = await self.list_tasks(normalized_id)
+            target: dict[str, Any] | None = None
+            for item in items:
+                if str(item.get("task_id") or "").strip() != normalized_task_id:
+                    continue
+                if user_message_id is not None:
+                    item["user_message_id"] = int(user_message_id)
+                if assistant_message_id is not None:
+                    item["assistant_message_id"] = int(assistant_message_id)
+                if status is not None:
+                    item["status"] = str(status).strip().lower() or item["status"]
+                if phase is not None:
+                    item["phase"] = str(phase).strip().lower() or item["phase"]
+                if route_mode is not None:
+                    item["route_mode"] = str(route_mode).strip().lower() or None
+                if answer_mode is not None:
+                    item["answer_mode"] = str(answer_mode).strip().lower() or None
+                if pending_tool_use_id is not None:
+                    item["pending_tool_use_id"] = str(pending_tool_use_id).strip() or None
+                if retry_count is not None:
+                    item["retry_count"] = max(int(retry_count), 0)
+                if failure_reason is not None:
+                    item["failure_reason"] = str(failure_reason).strip() or None
+                if completed_at is not None:
+                    item["completed_at"] = str(completed_at).strip() or None
+                if metadata is not None:
+                    item["metadata"] = metadata
+                item["updated_at"] = _now_text()
+                target = item
+                break
+            if target is None:
+                return None
+            await self._write_jsonl_atomic(get_tasks_path(self.settings, normalized_id), items)
+            return target
+
+    async def list_tool_uses(
+        self,
+        conversation_id: int,
+        *,
+        task_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = self._read_jsonl(get_tool_uses_path(self.settings, int(conversation_id)))
+        items = [_normalize_tool_use_dict(item) for item in rows]
+        normalized_task_id = str(task_id or "").strip()
+        if not normalized_task_id:
+            return items
+        return [item for item in items if str(item.get("task_id") or "").strip() == normalized_task_id]
+
+    async def get_tool_use(
+        self,
+        conversation_id: int,
+        tool_use_id: str,
+    ) -> dict[str, Any] | None:
+        normalized_tool_use_id = str(tool_use_id or "").strip()
+        if not normalized_tool_use_id:
+            return None
+        for item in reversed(await self.list_tool_uses(conversation_id)):
+            if str(item.get("tool_use_id") or "").strip() == normalized_tool_use_id:
+                return item
+        return None
+
+    async def append_tool_use(
+        self,
+        conversation_id: int,
+        *,
+        tool_use_id: str,
+        task_id: str,
+        tool_name: str,
+        status: str = "pending",
+        input_summary: dict[str, Any] | None = None,
+        raw_input: dict[str, Any] | None = None,
+        raw_output: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+        request_id: str | None = None,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+        updated_at: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_id = int(conversation_id)
+        async with self._get_lock(normalized_id):
+            if await self.get_session(normalized_id) is None:
+                raise RuntimeError("对话会话不存在，请刷新页面后重试。")
+            now = _now_text()
+            item = _normalize_tool_use_dict(
+                {
+                    "tool_use_id": str(tool_use_id or "").strip(),
+                    "task_id": str(task_id or "").strip(),
+                    "tool_name": tool_name,
+                    "status": status,
+                    "input_summary": input_summary or {},
+                    "raw_input": raw_input or {},
+                    "raw_output": raw_output,
+                    "error": error,
+                    "request_id": request_id,
+                    "started_at": started_at or now,
+                    "finished_at": finished_at,
+                    "updated_at": updated_at or started_at or now,
+                }
+            )
+            await self._append_jsonl(get_tool_uses_path(self.settings, normalized_id), item)
+            return item
+
+    async def replace_tool_use(
+        self,
+        conversation_id: int,
+        *,
+        tool_use_id: str,
+        status: str | None = None,
+        input_summary: dict[str, Any] | None = None,
+        raw_input: dict[str, Any] | None = None,
+        raw_output: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+        request_id: str | None = None,
+        finished_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        normalized_id = int(conversation_id)
+        normalized_tool_use_id = str(tool_use_id or "").strip()
+        async with self._get_lock(normalized_id):
+            items = await self.list_tool_uses(normalized_id)
+            target: dict[str, Any] | None = None
+            for item in items:
+                if str(item.get("tool_use_id") or "").strip() != normalized_tool_use_id:
+                    continue
+                if status is not None:
+                    item["status"] = str(status).strip().lower() or item["status"]
+                if input_summary is not None:
+                    item["input_summary"] = input_summary
+                if raw_input is not None:
+                    item["raw_input"] = raw_input
+                if raw_output is not None:
+                    item["raw_output"] = raw_output
+                if error is not None:
+                    item["error"] = error
+                if request_id is not None:
+                    item["request_id"] = str(request_id).strip() or None
+                if finished_at is not None:
+                    item["finished_at"] = str(finished_at).strip() or None
+                item["updated_at"] = _now_text()
+                target = item
+                break
+            if target is None:
+                return None
+            await self._write_jsonl_atomic(get_tool_uses_path(self.settings, normalized_id), items)
+            return target
+
+    async def list_approvals(
+        self,
+        conversation_id: int,
+        *,
+        task_id: str | None = None,
+        tool_use_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = self._read_jsonl(get_approvals_path(self.settings, int(conversation_id)))
+        items = [_normalize_approval_dict(item) for item in rows]
+        normalized_task_id = str(task_id or "").strip()
+        normalized_tool_use_id = str(tool_use_id or "").strip()
+        if normalized_task_id:
+            items = [item for item in items if str(item.get("task_id") or "").strip() == normalized_task_id]
+        if normalized_tool_use_id:
+            items = [item for item in items if str(item.get("tool_use_id") or "").strip() == normalized_tool_use_id]
+        return items
+
+    async def get_approval(
+        self,
+        conversation_id: int,
+        approval_id: str,
+    ) -> dict[str, Any] | None:
+        normalized_approval_id = str(approval_id or "").strip()
+        if not normalized_approval_id:
+            return None
+        for item in await self.list_approvals(conversation_id):
+            if str(item.get("approval_id") or "").strip() == normalized_approval_id:
+                return item
+        return None
+
+    async def append_approval(
+        self,
+        conversation_id: int,
+        *,
+        approval_id: str,
+        task_id: str,
+        tool_use_id: str,
+        status: str = "pending",
+        request_payload: dict[str, Any] | None = None,
+        decision_payload: dict[str, Any] | None = None,
+        created_at: str | None = None,
+        resolved_at: str | None = None,
+        updated_at: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_id = int(conversation_id)
+        async with self._get_lock(normalized_id):
+            if await self.get_session(normalized_id) is None:
+                raise RuntimeError("对话会话不存在，请刷新页面后重试。")
+            now = _now_text()
+            item = _normalize_approval_dict(
+                {
+                    "approval_id": str(approval_id or "").strip(),
+                    "task_id": str(task_id or "").strip(),
+                    "tool_use_id": str(tool_use_id or "").strip(),
+                    "status": status,
+                    "request_payload": request_payload or {},
+                    "decision_payload": decision_payload,
+                    "created_at": created_at or now,
+                    "resolved_at": resolved_at,
+                    "updated_at": updated_at or created_at or now,
+                }
+            )
+            await self._append_jsonl(get_approvals_path(self.settings, normalized_id), item)
+            return item
+
+    async def replace_approval(
+        self,
+        conversation_id: int,
+        *,
+        approval_id: str,
+        status: str | None = None,
+        decision_payload: dict[str, Any] | None = None,
+        resolved_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        normalized_id = int(conversation_id)
+        normalized_approval_id = str(approval_id or "").strip()
+        async with self._get_lock(normalized_id):
+            items = await self.list_approvals(normalized_id)
+            target: dict[str, Any] | None = None
+            for item in items:
+                if str(item.get("approval_id") or "").strip() != normalized_approval_id:
+                    continue
+                if status is not None:
+                    item["status"] = str(status).strip().lower() or item["status"]
+                if decision_payload is not None:
+                    item["decision_payload"] = decision_payload
+                if resolved_at is not None:
+                    item["resolved_at"] = str(resolved_at).strip() or None
+                item["updated_at"] = _now_text()
+                target = item
+                break
+            if target is None:
+                return None
+            await self._write_jsonl_atomic(get_approvals_path(self.settings, normalized_id), items)
+            return target
+
+    async def append_task_event(
+        self,
+        conversation_id: int,
+        *,
+        event_id: str,
+        task_id: str,
+        event_type: str,
+        tool_use_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_id = int(conversation_id)
+        async with self._get_lock(normalized_id):
+            if await self.get_session(normalized_id) is None:
+                raise RuntimeError("对话会话不存在，请刷新页面后重试。")
+            item = _normalize_task_event_dict(
+                {
+                    "event_id": str(event_id or "").strip(),
+                    "task_id": str(task_id or "").strip(),
+                    "tool_use_id": str(tool_use_id or "").strip() or None,
+                    "event_type": event_type,
+                    "payload": payload or {},
+                    "created_at": created_at or _now_text(),
+                }
+            )
+            await self._append_jsonl(get_task_events_path(self.settings, normalized_id), item)
+            return item
+
+    async def list_task_events(
+        self,
+        conversation_id: int,
+        *,
+        task_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = self._read_jsonl(get_task_events_path(self.settings, int(conversation_id)))
+        items = [_normalize_task_event_dict(item) for item in rows]
+        normalized_task_id = str(task_id or "").strip()
+        if not normalized_task_id:
+            return items
+        return [item for item in items if str(item.get("task_id") or "").strip() == normalized_task_id]
 
     async def read_memory(self, conversation_id: int) -> dict[str, Any] | None:
         normalized_id = int(conversation_id)
@@ -412,51 +883,6 @@ class ChatStore:
                 else None,
                 "updated_at": now,
             }
-
-    async def read_memory_sections(self, conversation_id: int) -> list[dict[str, Any]]:
-        normalized_id = int(conversation_id)
-        rows = self._read_jsonl(get_memory_sections_path(self.settings, normalized_id))
-        items: list[dict[str, Any]] = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            items.append(
-                {
-                    "section_id": str(row.get("section_id") or "").strip(),
-                    "type": str(row.get("type") or "").strip(),
-                    "content": str(row.get("content") or "").strip(),
-                    "keywords": list(row.get("keywords") or []),
-                    "updated_at": str(row.get("updated_at") or "") or None,
-                    "source_message_start": int(row["source_message_start"])
-                    if row.get("source_message_start") is not None
-                    else None,
-                    "source_message_end": int(row["source_message_end"])
-                    if row.get("source_message_end") is not None
-                    else None,
-                }
-            )
-        return items
-
-    async def write_memory_sections(
-        self,
-        conversation_id: int,
-        *,
-        sections: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        normalized_id = int(conversation_id)
-        async with self._get_lock(normalized_id):
-            payload = "\n".join(
-                json.dumps(dict(item or {}), ensure_ascii=False)
-                for item in sections
-                if isinstance(item, dict)
-            )
-            if payload:
-                payload += "\n"
-            await self._write_text_atomic(
-                get_memory_sections_path(self.settings, normalized_id),
-                payload,
-            )
-            return await self.read_memory_sections(normalized_id)
 
     async def read_context_stats(self, conversation_id: int) -> dict[str, Any] | None:
         normalized_id = int(conversation_id)
@@ -541,35 +967,6 @@ class ChatStore:
             payload["created_at"] = str(payload.get("created_at") or "") or None
             items.append(payload)
         return items
-
-    async def read_pending_approval(self, conversation_id: int) -> dict[str, Any] | None:
-        normalized_id = int(conversation_id)
-        payload = self._read_json(get_pending_approval_path(self.settings, normalized_id))
-        return payload if isinstance(payload, dict) else None
-
-    async def write_pending_approval(
-        self,
-        conversation_id: int,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        normalized_id = int(conversation_id)
-        async with self._get_lock(normalized_id):
-            data = dict(payload or {})
-            data["conversation_id"] = normalized_id
-            data.setdefault("updated_at", _now_text())
-            await self._write_json_atomic(
-                get_pending_approval_path(self.settings, normalized_id),
-                data,
-            )
-            return data
-
-    async def clear_pending_approval(self, conversation_id: int) -> None:
-        normalized_id = int(conversation_id)
-        async with self._get_lock(normalized_id):
-            path = get_pending_approval_path(self.settings, normalized_id)
-            if path.exists():
-                path.unlink()
-
 
 def create_chat_store(settings) -> ChatStore:
     return ChatStore(settings)

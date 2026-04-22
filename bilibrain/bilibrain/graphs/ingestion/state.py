@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
+
+if TYPE_CHECKING:
+    from bilibrain.core.runtime import Runtime
 
 
 class IngestionState(TypedDict, total=False):
-    runtime: Any
     bvid: str
     current_step: str
     video: dict[str, Any] | None
@@ -19,15 +21,17 @@ class IngestionState(TypedDict, total=False):
     skip_summary: bool
 
 
+class IngestionContext(TypedDict, total=False):
+    runtime: Runtime
+
+
 def build_initial_state(
-    runtime: Any,
     bvid: str,
     temp_audio_path: Path,
     *,
     skip_summary: bool = False,
 ) -> IngestionState:
     return {
-        "runtime": runtime,
         "bvid": bvid,
         "current_step": "audio",
         "temp_audio_path": str(temp_audio_path),

@@ -14,12 +14,19 @@ from bilibrain.graphs.summary.nodes import (
     save_summary_result,
     should_return_cached_summary,
 )
-from bilibrain.graphs.summary.state import SummaryState, build_initial_summary_state
+from bilibrain.graphs.summary.state import (
+    SummaryContext,
+    SummaryState,
+    build_initial_summary_state,
+)
 
 
 @lru_cache(maxsize=1)
 def get_summary_graph():
-    builder = StateGraph(SummaryState)
+    builder = StateGraph(
+        SummaryState,
+        context_schema=SummaryContext,
+    )
     builder.add_node("load_summary_context", load_summary_context)
     builder.add_node("prepare_summary_segments", prepare_summary_segments)
     builder.add_node("generate_direct_summary", generate_direct_summary)
@@ -55,5 +62,5 @@ def get_summary_graph():
 
 async def run_summary_graph(runtime, bvid: str) -> dict | None:
     graph = get_summary_graph()
-    await graph.ainvoke(build_initial_summary_state(runtime, bvid))
+    await graph.ainvoke(build_initial_summary_state(bvid), context={"runtime": runtime})
     return await runtime.db.get_video_summary(bvid)

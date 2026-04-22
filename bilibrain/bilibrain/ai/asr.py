@@ -21,7 +21,7 @@ from bilibrain.core.config import Settings
 logger = logging.getLogger(__name__)
 
 
-class WhisperAsrClient:
+class AsrClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._client = QwenAsrClient(settings)

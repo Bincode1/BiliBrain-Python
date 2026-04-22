@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from langgraph.runtime import Runtime as GraphRuntime
+
 from bilibrain.graphs.summary.state import SummaryState
 from bilibrain.services.common import merge_transcript_segments
 from bilibrain.services.summary import (
@@ -11,39 +13,45 @@ from bilibrain.services.summary import (
 )
 
 
-async def load_summary_context(state: SummaryState) -> SummaryState:
-    runtime = state["runtime"]
+async def load_summary_context(
+    state: SummaryState,
+    runtime: GraphRuntime,
+) -> SummaryState:
+    app_runtime = runtime.context["runtime"]
     bvid = state["bvid"]
-    transcript = await runtime.db.get_transcript(bvid)
+    transcript = await app_runtime.db.get_transcript(bvid)
     if not transcript:
         return {
             "transcript": None,
-            "video": await runtime.db.get_video(bvid),
+            "video": await app_runtime.db.get_video(bvid),
         }
     return {
         "transcript": transcript,
-        "video": await runtime.db.get_video(bvid),
+        "video": await app_runtime.db.get_video(bvid),
         "transcript_hash": compute_transcript_hash(
             str(transcript.get("transcript_text") or "")
         ),
-        "existing_summary": await runtime.db.get_video_summary(bvid),
+        "existing_summary": await app_runtime.db.get_video_summary(bvid),
     }
 
 
-async def prepare_summary_segments(state: SummaryState) -> SummaryState:
-    runtime = state["runtime"]
+async def prepare_summary_segments(
+    state: SummaryState,
+    runtime: GraphRuntime,
+) -> SummaryState:
+    app_runtime = runtime.context["runtime"]
     transcript = state.get("transcript")
     if not transcript:
         return {"merged_segments": [], "total_chars": 0}
 
     merged_segments = merge_transcript_segments(
         build_segment_inputs(list(transcript.get("segments") or [])),
-        max_gap=runtime.settings.transcript_merge_max_gap,
-        max_duration=runtime.settings.transcript_merge_max_duration,
-        target_chars=runtime.settings.transcript_chunk_target_chars,
-        min_chars=runtime.settings.transcript_chunk_min_chars,
-        overlap_chars=runtime.settings.transcript_chunk_overlap_chars,
-        max_tokens=runtime.settings.transcript_chunk_max_tokens,
+        max_gap=app_runtime.settings.transcript_merge_max_gap,
+        max_duration=app_runtime.settings.transcript_merge_max_duration,
+        target_chars=app_runtime.settings.transcript_chunk_target_chars,
+        min_chars=app_runtime.settings.transcript_chunk_min_chars,
+        overlap_chars=app_runtime.settings.transcript_chunk_overlap_chars,
+        max_tokens=app_runtime.settings.transcript_chunk_max_tokens,
     )
     total_chars = sum(
         len(str(segment.get("content") or "")) for segment in merged_segments
@@ -54,26 +62,32 @@ async def prepare_summary_segments(state: SummaryState) -> SummaryState:
     }
 
 
-async def generate_direct_summary(state: SummaryState) -> SummaryState:
-    runtime = state["runtime"]
-    runtime.qwen.ensure_configured()
+async def generate_direct_summary(
+    state: SummaryState,
+    runtime: GraphRuntime,
+) -> SummaryState:
+    app_runtime = runtime.context["runtime"]
+    app_runtime.qwen.ensure_configured()
     merged_segments = state.get("merged_segments") or []
     video = state.get("video") or {}
-    summary_text = await runtime.qwen.summarize_video(
+    summary_text = await app_runtime.qwen.summarize_video(
         video_title=str(video.get("title") or state["bvid"]),
         transcript_text=format_window_text(merged_segments),
     )
     return {"summary_text": str(summary_text or "").strip()}
 
 
-async def generate_window_summaries(state: SummaryState) -> SummaryState:
-    runtime = state["runtime"]
-    runtime.qwen.ensure_configured()
+async def generate_window_summaries(
+    state: SummaryState,
+    runtime: GraphRuntime,
+) -> SummaryState:
+    app_runtime = runtime.context["runtime"]
+    app_runtime.qwen.ensure_configured()
     merged_segments = state.get("merged_segments") or []
     video = state.get("video") or {}
     window_summaries: list[str] = []
     for window in pack_summary_windows(merged_segments):
-        summary = await runtime.qwen.summarize_video_window(
+        summary = await app_runtime.qwen.summarize_video_window(
             video_title=str(video.get("title") or state["bvid"]),
             transcript_text=format_window_text(window),
         )
@@ -83,24 +97,30 @@ async def generate_window_summaries(state: SummaryState) -> SummaryState:
     return {"window_summaries": window_summaries}
 
 
-async def reduce_window_summaries(state: SummaryState) -> SummaryState:
-    runtime = state["runtime"]
-    runtime.qwen.ensure_configured()
+async def reduce_window_summaries(
+    state: SummaryState,
+    runtime: GraphRuntime,
+) -> SummaryState:
+    app_runtime = runtime.context["runtime"]
+    app_runtime.qwen.ensure_configured()
     video = state.get("video") or {}
-    summary_text = await runtime.qwen.reduce_video_summaries(
+    summary_text = await app_runtime.qwen.reduce_video_summaries(
         video_title=str(video.get("title") or state["bvid"]),
         window_summaries=state.get("window_summaries") or [],
     )
     return {"summary_text": str(summary_text or "").strip()}
 
 
-async def save_summary_result(state: SummaryState) -> SummaryState:
-    runtime = state["runtime"]
+async def save_summary_result(
+    state: SummaryState,
+    runtime: GraphRuntime,
+) -> SummaryState:
+    app_runtime = runtime.context["runtime"]
     summary_text = str(state.get("summary_text") or "").strip()
     transcript_hash = str(state.get("transcript_hash") or "").strip()
     if not summary_text or not transcript_hash:
         return {}
-    await runtime.db.save_video_summary(
+    await app_runtime.db.save_video_summary(
         bvid=state["bvid"],
         transcript_hash=transcript_hash,
         summary_text=summary_text,

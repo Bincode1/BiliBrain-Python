@@ -153,13 +153,6 @@ _INDEX_DDLS = [
     "CREATE INDEX IF NOT EXISTS idx_tc_workspace ON tool_calls (workspace_id)",
 ]
 
-_LEGACY_CHAT_TABLES = (
-    "chat_conversation_context_stats",
-    "chat_conversation_memory",
-    "chat_messages",
-    "chat_conversations",
-)
-
 
 # ---------------------------------------------------------------------------
 # Database facade
@@ -231,11 +224,6 @@ class Database:
                 conn.execute(text(f"ALTER TABLE folders ADD COLUMN {col} {col_def}"))
             except Exception:
                 pass
-
-    async def drop_legacy_chat_tables(self) -> None:
-        async with self.engine.begin() as conn:
-            for table_name in _LEGACY_CHAT_TABLES:
-                await conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
 
     # -- formatting helpers (used by query modules) ------------------------
 

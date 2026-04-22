@@ -1,3 +1,3 @@
-from bilibrain.api.routes import auth, folders, qa, system, videos
+from bilibrain.api.routes import auth, chat, folders, system, videos
 
-__all__ = ["auth", "folders", "qa", "system", "videos"]
+__all__ = ["auth", "chat", "folders", "system", "videos"]

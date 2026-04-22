@@ -60,13 +60,9 @@ class Settings:
     data_dir: Path
     chroma_collection: str
     embedding_dimension: int
-    whisper_model: str
-    whisper_device: str
-    whisper_compute_type: str
     dashscope_api_key: str
     dashscope_base_url: str
     llm_model: str
-    planner_llm_model: str
     asr_language: str
     asr_api_base_url: str
     asr_api_model: str
@@ -99,12 +95,6 @@ class Settings:
     reset_max_concurrency: int
     ingestion_poll_interval_seconds: float
     ingestion_task_stale_after_seconds: int
-    ragas_dataset_root: Path
-    ragas_experiment_root: Path
-    ragas_run_timeout_seconds: int
-    ragas_run_max_retries: int
-    ragas_run_max_workers: int
-    ragas_enable_answer_relevancy: bool
     tools_enabled: bool
     tools_runtime: str
     tools_workspace_root: Path
@@ -115,6 +105,7 @@ class Settings:
     tools_approval_required_for_command: bool
     tools_allowed_command_prefixes: tuple[tuple[str, ...], ...]
     tools_blocked_command_prefixes: tuple[tuple[str, ...], ...]
+    tools_local_command_prefixes: tuple[tuple[str, ...], ...]
     tools_docker_bin: str
     tools_docker_image: str
     tools_docker_user: str
@@ -152,6 +143,10 @@ class Settings:
     def chat_dir(self) -> Path:
         return self.data_dir / "chat"
 
+    @property
+    def agent_runtime_dir(self) -> Path:
+        return self.data_dir / "agent_runtime"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
@@ -160,16 +155,12 @@ def get_settings() -> Settings:
         data_dir=WORKSPACE_DIR / os.getenv("DATA_DIR", "data"),
         chroma_collection=os.getenv("CHROMA_COLLECTION", "bili_chunks"),
         embedding_dimension=_int("EMBEDDING_DIMENSION", 1024),
-        whisper_model=os.getenv("WHISPER_MODEL", "medium"),
-        whisper_device=os.getenv("WHISPER_DEVICE", "cpu"),
-        whisper_compute_type=os.getenv("WHISPER_COMPUTE_TYPE", "int8"),
         dashscope_api_key=os.getenv("DASHSCOPE_API_KEY", "").strip(),
         dashscope_base_url=os.getenv(
             "DASHSCOPE_BASE_URL",
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
         ).rstrip("/"),
         llm_model=os.getenv("LLM_MODEL", "qwen-plus"),
-        planner_llm_model=os.getenv("PLANNER_LLM_MODEL", os.getenv("LLM_MODEL", "qwen-plus")).strip(),
         asr_language=os.getenv("ASR_LANGUAGE", "zh").strip(),
         asr_api_base_url=os.getenv(
             "ASR_API_BASE_URL",
@@ -220,12 +211,6 @@ def get_settings() -> Settings:
         reset_max_concurrency=_int("RESET_MAX_CONCURRENCY", 4),
         ingestion_poll_interval_seconds=_float("INGESTION_POLL_INTERVAL_SECONDS", 2.0),
         ingestion_task_stale_after_seconds=_int("INGESTION_TASK_STALE_AFTER_SECONDS", 1800),
-        ragas_dataset_root=WORKSPACE_DIR / "bilibrain" / os.getenv("RAGAS_DATASET_ROOT", "datasets"),
-        ragas_experiment_root=WORKSPACE_DIR / "bilibrain" / os.getenv("RAGAS_EXPERIMENT_ROOT", "experiments"),
-        ragas_run_timeout_seconds=_int("RAGAS_RUN_TIMEOUT_SECONDS", 120),
-        ragas_run_max_retries=_int("RAGAS_RUN_MAX_RETRIES", 3),
-        ragas_run_max_workers=_int("RAGAS_RUN_MAX_WORKERS", 4),
-        ragas_enable_answer_relevancy=_bool("RAGAS_ENABLE_ANSWER_RELEVANCY", False),
         tools_enabled=_bool("TOOLS_ENABLED", False),
         tools_runtime=os.getenv("TOOLS_RUNTIME", "local_dev").strip().lower(),
         tools_workspace_root=WORKSPACE_DIR / "bilibrain" / os.getenv("TOOLS_WORKSPACE_ROOT", "data/tool_workspaces"),
@@ -247,6 +232,7 @@ def get_settings() -> Settings:
                 ("format",),
             ),
         ),
+        tools_local_command_prefixes=_command_prefixes("TOOLS_LOCAL_COMMAND_PREFIXES", ()),
         tools_docker_bin=os.getenv("TOOLS_DOCKER_BIN", "docker").strip(),
         tools_docker_image=os.getenv("TOOLS_DOCKER_IMAGE", "python:3.13-alpine").strip(),
         tools_docker_user=os.getenv("TOOLS_DOCKER_USER", "65532:65532").strip(),

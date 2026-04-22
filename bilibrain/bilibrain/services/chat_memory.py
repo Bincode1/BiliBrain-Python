@@ -8,10 +8,8 @@ from bilibrain.services.chat_storage import (
     list_recent_chat_session_messages,
     read_chat_session_context_stats,
     read_chat_session_memory,
-    read_chat_session_memory_sections,
-    write_chat_memory_dual_write,
-    write_chat_memory_sections_dual_write,
-    write_context_stats_dual_write,
+    write_chat_memory,
+    write_context_stats,
 )
 from bilibrain.services.common import estimate_text_tokens
 
@@ -20,15 +18,6 @@ if TYPE_CHECKING:
 
 
 DEFAULT_RECENT_TURNS = 5
-MEMORY_SECTION_HEADINGS = (
-    ("当前活跃目标", "active_goal"),
-    ("当前活跃知识范围", "active_scope"),
-    ("历史已完成话题", "completed_topic"),
-    ("已确认结论", "confirmed_fact"),
-    ("未解决问题", "open_question"),
-    ("术语与指代", "user_preference"),
-    ("最近推进状态", "recent_progress"),
-)
 
 
 @dataclass
@@ -47,109 +36,6 @@ class ConversationContext:
     @property
     def uncompacted_token_estimate(self) -> int:
         return self.live_prefix_token_estimate
-
-
-def _normalize_heading(line: str) -> str:
-    return (
-        str(line or "")
-        .strip()
-        .lstrip("#")
-        .lstrip("-")
-        .lstrip("*")
-        .strip()
-        .rstrip("：:")
-        .strip()
-    )
-
-
-def _extract_keywords(content: str) -> list[str]:
-    keywords: list[str] = []
-    seen: set[str] = set()
-    for raw in str(content or "").replace("，", " ").replace("。", " ").split():
-        token = raw.strip(" -:：,.;；、()[]{}<>\"'`")
-        if len(token) < 2 or token in seen:
-            continue
-        seen.add(token)
-        keywords.append(token)
-        if len(keywords) >= 12:
-            break
-    return keywords
-
-
-def build_memory_sections(
-    memory_text: str,
-    *,
-    source_message_start: int | None,
-    source_message_end: int | None,
-) -> list[dict[str, Any]]:
-    normalized_text = str(memory_text or "").strip()
-    if not normalized_text:
-        return []
-
-    heading_to_type = {heading: kind for heading, kind in MEMORY_SECTION_HEADINGS}
-    sections: list[dict[str, Any]] = []
-    current_heading: str | None = None
-    current_lines: list[str] = []
-
-    def flush() -> None:
-        nonlocal current_heading, current_lines
-        if not current_heading:
-            current_lines = []
-            return
-        content = "\n".join(line for line in current_lines if line.strip()).strip()
-        if not content:
-            current_heading = None
-            current_lines = []
-            return
-        section_type = heading_to_type.get(current_heading, "memory_note")
-        sections.append(
-            {
-                "section_id": f"mem-{len(sections) + 1}",
-                "type": section_type,
-                "content": content,
-                "keywords": _extract_keywords(content),
-                "updated_at": None,
-                "source_message_start": source_message_start,
-                "source_message_end": source_message_end,
-            }
-        )
-        current_heading = None
-        current_lines = []
-
-    for raw_line in normalized_text.splitlines():
-        line = str(raw_line or "").rstrip()
-        heading = _normalize_heading(line)
-        if heading in heading_to_type:
-            flush()
-            current_heading = heading
-            continue
-        if current_heading is None:
-            continue
-        current_lines.append(line)
-
-    flush()
-
-    if sections:
-        return sections
-    return [
-        {
-            "section_id": "mem-1",
-            "type": "memory_note",
-            "content": normalized_text,
-            "keywords": _extract_keywords(normalized_text),
-            "updated_at": None,
-            "source_message_start": source_message_start,
-            "source_message_end": source_message_end,
-        }
-    ]
-
-
-async def read_memory_sections(
-    runtime: Runtime,
-    *,
-    conversation_id: int,
-) -> list[dict[str, Any]]:
-    return await read_chat_session_memory_sections(runtime, conversation_id)
 
 
 def estimate_history_tokens(messages: list[dict[str, Any]]) -> int:
@@ -350,7 +236,7 @@ async def _recompute_context_stats(
         compacted_until_message_id=compacted_until_message_id,
         keep_turns=runtime.settings.chat_recent_turns_to_keep,
     )
-    return await write_context_stats_dual_write(
+    return await write_context_stats(
         runtime,
         conversation_id,
         **payload,
@@ -475,23 +361,11 @@ async def compact_conversation_context(
         history_transcript=transcript,
     )
     latest_message_id = max(_message_id(item) for item in compactable_history)
-    await write_chat_memory_dual_write(
+    await write_chat_memory(
         runtime,
         conversation_id,
         memory_text=memory_text,
         compacted_until_message_id=latest_message_id,
-    )
-    memory_sections = build_memory_sections(
-        memory_text,
-        source_message_start=_message_id(compactable_history[0])
-        if compactable_history
-        else None,
-        source_message_end=latest_message_id,
-    )
-    await write_chat_memory_sections_dual_write(
-        runtime,
-        conversation_id,
-        sections=memory_sections,
     )
     await _recompute_context_stats(
         runtime,

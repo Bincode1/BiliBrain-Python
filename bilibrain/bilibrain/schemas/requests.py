@@ -20,6 +20,7 @@ class AskRequest(BaseModel):
 
 class AgentResumeRequest(BaseModel):
     conversation_id: int | None = Field(default=None, gt=0)
+    task_id: str | None = Field(default=None, min_length=1, max_length=128)
     session_id: str = Field(..., min_length=1, max_length=128)
     decision: dict = Field(default_factory=dict)
     actor: str = Field(default="agent", min_length=1, max_length=64)

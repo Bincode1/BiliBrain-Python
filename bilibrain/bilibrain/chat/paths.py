@@ -26,12 +26,24 @@ def get_messages_path(settings, conversation_id: int) -> Path:
     return get_session_dir(settings, conversation_id) / "messages.jsonl"
 
 
+def get_tasks_path(settings, conversation_id: int) -> Path:
+    return get_session_dir(settings, conversation_id) / "tasks.jsonl"
+
+
+def get_tool_uses_path(settings, conversation_id: int) -> Path:
+    return get_session_dir(settings, conversation_id) / "tool_uses.jsonl"
+
+
+def get_approvals_path(settings, conversation_id: int) -> Path:
+    return get_session_dir(settings, conversation_id) / "approvals.jsonl"
+
+
+def get_task_events_path(settings, conversation_id: int) -> Path:
+    return get_session_dir(settings, conversation_id) / "task_events.jsonl"
+
+
 def get_memory_path(settings, conversation_id: int) -> Path:
     return get_session_dir(settings, conversation_id) / "memory.txt"
-
-
-def get_memory_sections_path(settings, conversation_id: int) -> Path:
-    return get_session_dir(settings, conversation_id) / "memory_sections.jsonl"
 
 
 def get_context_stats_path(settings, conversation_id: int) -> Path:
@@ -44,11 +56,6 @@ def get_context_layers_path(settings, conversation_id: int) -> Path:
 
 def get_tool_events_path(settings, conversation_id: int) -> Path:
     return get_session_dir(settings, conversation_id) / "tool_events.jsonl"
-
-
-def get_pending_approval_path(settings, conversation_id: int) -> Path:
-    return get_session_dir(settings, conversation_id) / "pending_approval.json"
-
 
 def get_artifacts_dir(settings, conversation_id: int) -> Path:
     return get_session_dir(settings, conversation_id) / "artifacts"

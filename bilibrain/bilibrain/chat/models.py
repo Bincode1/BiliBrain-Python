@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -24,10 +24,12 @@ class ChatSessionMeta:
 class ChatMessageRecord:
     message_id: int
     conversation_id: int
+    task_id: str | None
     role: str
     content: str
     sources: list[dict[str, Any]]
     created_at: str | None
+    message_kind: str = "default"
     answer_mode: str | None = None
     route_mode: str | None = None
     updated_at: str | None = None
@@ -62,6 +64,76 @@ class ChatIndexEntry:
     created_at: str | None
     updated_at: str | None
     status: str = "active"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class TaskRecord:
+    task_id: str
+    conversation_id: int
+    user_message_id: int | None
+    assistant_message_id: int | None
+    status: str
+    phase: str
+    route_mode: str | None = None
+    answer_mode: str | None = None
+    pending_tool_use_id: str | None = None
+    retry_count: int = 0
+    failure_reason: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    completed_at: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class ToolUseRecord:
+    tool_use_id: str
+    task_id: str
+    tool_name: str
+    status: str
+    input_summary: dict[str, Any] = field(default_factory=dict)
+    raw_input: dict[str, Any] = field(default_factory=dict)
+    raw_output: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+    request_id: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    updated_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class ApprovalRecord:
+    approval_id: str
+    task_id: str
+    tool_use_id: str
+    status: str
+    request_payload: dict[str, Any] = field(default_factory=dict)
+    decision_payload: dict[str, Any] | None = None
+    created_at: str | None = None
+    resolved_at: str | None = None
+    updated_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class TaskEventRecord:
+    event_id: str
+    task_id: str
+    tool_use_id: str | None
+    event_type: str
+    payload: dict[str, Any] = field(default_factory=dict)
+    created_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

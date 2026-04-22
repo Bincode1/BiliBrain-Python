@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+import re
 import shlex
 from dataclasses import dataclass, field
 from typing import Iterable
+
+
+_DANGEROUS_COMMAND_PATTERNS = (
+    re.compile(r"(^|[^a-z])shutdown([\s./-]|$)", re.IGNORECASE),
+    re.compile(r"(^|[^a-z])reboot([\s./-]|$)", re.IGNORECASE),
+    re.compile(r"(^|[^a-z])poweroff([\s./-]|$)", re.IGNORECASE),
+    re.compile(r"(^|[^a-z])mkfs([\s./-]|$)", re.IGNORECASE),
+    re.compile(r"(^|[^a-z])diskpart([\s./-]|$)", re.IGNORECASE),
+    re.compile(r"(^|[^a-z])format([\s./-]|$)", re.IGNORECASE),
+)
 
 
 @dataclass(frozen=True)
@@ -43,10 +54,36 @@ def _starts_with(parts: list[str], prefix: list[str]) -> bool:
     return parts[: len(prefix)] == prefix
 
 
-def evaluate_command_request(policy: ToolPolicy, command: str) -> ToolPolicyDecision:
+def _contains_dangerous_pattern(payload: str) -> str | None:
+    text = str(payload or "")
+    if not text.strip():
+        return None
+    for pattern in _DANGEROUS_COMMAND_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            token = match.group(0).strip()
+            return token
+    return None
+
+
+def evaluate_command_request(
+    policy: ToolPolicy,
+    command: str,
+    *,
+    script_body: str | None = None,
+) -> ToolPolicyDecision:
     parts = _command_parts(command)
     if not parts:
         return ToolPolicyDecision(allowed=False, requires_approval=False, reason="Empty command is not allowed.")
+
+    for payload in (command, script_body):
+        dangerous_token = _contains_dangerous_pattern(str(payload or ""))
+        if dangerous_token:
+            return ToolPolicyDecision(
+                allowed=False,
+                requires_approval=False,
+                reason=f"Blocked dangerous command content: {dangerous_token}",
+            )
 
     blocked_prefixes = _normalize_prefixes(policy.blocked_command_prefixes)
     for prefix in blocked_prefixes:

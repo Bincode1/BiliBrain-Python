@@ -16,12 +16,19 @@ from bilibrain.graphs.ingestion.nodes import (
     upsert_index_chunks,
     validate_video_context,
 )
-from bilibrain.graphs.ingestion.state import IngestionState, build_initial_state
+from bilibrain.graphs.ingestion.state import (
+    IngestionContext,
+    IngestionState,
+    build_initial_state,
+)
 
 
 @lru_cache(maxsize=1)
 def get_ingestion_graph():
-    builder = StateGraph(IngestionState)
+    builder = StateGraph(
+        IngestionState,
+        context_schema=IngestionContext,
+    )
     builder.add_node("load_video_context", load_video_context)
     builder.add_node("validate_video_context", validate_video_context)
     builder.add_node("ensure_audio_input", ensure_audio_input)
@@ -47,9 +54,8 @@ async def run_ingestion_graph(runtime, bvid: str, *, skip_summary: bool = False)
     graph = get_ingestion_graph()
     with tempfile.TemporaryDirectory(prefix="bilibrain-audio-") as temp_dir:
         initial_state = build_initial_state(
-            runtime,
             bvid,
             Path(temp_dir) / f"{bvid}.m4a",
             skip_summary=skip_summary,
         )
-        await graph.ainvoke(initial_state)
+        await graph.ainvoke(initial_state, context={"runtime": runtime})
