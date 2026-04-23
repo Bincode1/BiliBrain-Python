@@ -36,7 +36,7 @@
             </div>
             <div>
               <label class="text-xs text-muted-foreground mb-1 block">API Key</label>
-              <input v-model="form.dashscope_api_key" type="password" class="input-field" placeholder="sk-..." />
+              <input v-model="form.dashscope_api_key" type="password" class="input-field" :placeholder="apiKeyPlaceholder" />
             </div>
           </div>
         </section>
@@ -109,6 +109,7 @@ const tabs = [
 const activeTab = ref("models");
 const saving = ref(false);
 const saveStatus = ref(null); // null | 'success' | 'error'
+const apiKeyPlaceholder = ref("sk-...");
 
 const form = ref({
   llm_model: "",
@@ -123,6 +124,10 @@ const form = ref({
 onMounted(async () => {
   const data = await getModelSettings();
   Object.assign(form.value, data);
+  if (form.value.dashscope_api_key === "__REDACTED__") {
+    form.value.dashscope_api_key = "";
+    apiKeyPlaceholder.value = "已设置（留空保持不变）";
+  }
 });
 
 async function handleSave() {

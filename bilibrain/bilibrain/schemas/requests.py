@@ -47,7 +47,7 @@ class TagsRequest(BaseModel):
 
 class ModelSettingsRequest(BaseModel):
     llm_model: str = Field(..., min_length=1)
-    dashscope_api_key: str = Field(..., min_length=1)
+    dashscope_api_key: str = Field(default="")
     dashscope_base_url: str = Field(default="")
     embedding_model: str = Field(default="")
     ollama_base_url: str = Field(default="")

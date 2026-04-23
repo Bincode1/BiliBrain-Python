@@ -20,6 +20,9 @@ _ENV_KEY_MAP = {
 }
 
 
+_API_KEY_SENTINEL = "__REDACTED__"
+
+
 @router.get("/api/settings/models", response_model=ModelSettingsResponse)
 async def get_model_settings(
     runtime: Runtime = Depends(get_runtime),
@@ -27,7 +30,7 @@ async def get_model_settings(
     s = runtime.settings
     return ModelSettingsResponse(
         llm_model=s.llm_model,
-        dashscope_api_key=s.dashscope_api_key,
+        dashscope_api_key=_API_KEY_SENTINEL if s.dashscope_api_key else "",
         dashscope_base_url=s.dashscope_base_url,
         embedding_model=s.embedding_model,
         ollama_base_url=s.ollama_base_url,
@@ -44,6 +47,7 @@ async def update_model_settings(
         _ENV_KEY_MAP[field]: value
         for field, value in payload.model_dump().items()
         if field in _ENV_KEY_MAP
+        and not (field == "dashscope_api_key" and value == _API_KEY_SENTINEL)
     }
     await write_env(updates)
     return {"ok": True, "restart_required": True}
