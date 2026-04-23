@@ -108,6 +108,14 @@
     <SidebarFooter>
       <SidebarMenu>
         <SidebarMenuItem>
+          <SidebarMenuButton as-child size="sm" tooltip="设置" :is-active="isActive('settings')">
+            <RouterLink to="/settings">
+              <Settings />
+              <span>设置</span>
+            </RouterLink>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+        <SidebarMenuItem>
           <SidebarMenuButton size="sm" @click="toggleSidebar">
             <PanelLeftClose v-if="isOpen" />
             <PanelLeft v-else />
@@ -131,6 +139,7 @@ import {
   PanelLeftClose,
   PanelLeft,
   Plus,
+  Settings,
 } from "lucide-vue-next";
 
 import {

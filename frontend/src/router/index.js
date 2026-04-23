@@ -5,6 +5,7 @@ import ChatFeatureView from "@/views/ChatFeatureView.vue";
 import LibraryFeatureView from "@/views/LibraryFeatureView.vue";
 import SkillsStoreView from "@/views/SkillsStoreView.vue";
 import ToolsStoreView from "@/views/ToolsStoreView.vue";
+import SettingsView from "@/views/SettingsView.vue";
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -44,6 +45,11 @@ const router = createRouter({
         {
           path: "workspace",
           redirect: { name: "library" },
+        },
+        {
+          path: "settings",
+          name: "settings",
+          component: SettingsView,
         },
       ],
     },
