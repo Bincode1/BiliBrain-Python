@@ -96,13 +96,7 @@ defineEmits(["toggleSources"]);
 const store = useChatStore();
 
 const hasAgentContent = computed(() =>
-  !!(
-    store.hasTaskActivity(props.message.task_id) ||
-    props.message.agent_events?.length ||
-    props.message.active_skills?.length ||
-    props.message.skill_events?.length ||
-    props.message.tool_events?.length
-  )
+  store.hasVisibleTaskActivity(props.message.task_id)
 );
 
 const sourceLabel = computed(() => messageSourceLabel(props.message));

@@ -131,17 +131,9 @@ const task = computed(() => taskBundle.value.task);
 const taskToolUses = computed(() => taskBundle.value.toolUses || []);
 const taskApprovals = computed(() => taskBundle.value.approvals || []);
 const taskEvents = computed(() => taskBundle.value.taskEvents || []);
-const skillTaskEvents = computed(() =>
-  taskEvents.value.filter((item) => item.event_type === "skill")
-);
 
 const hasEvents = computed(() =>
-  !!(
-    task.value ||
-    taskToolUses.value.length ||
-    taskApprovals.value.length ||
-    taskEvents.value.length
-  )
+  !!(renderedActivities.value.length || auxiliaryEvents.value.length)
 );
 
 function statusIcon(state) {
@@ -218,74 +210,8 @@ const renderedTools = computed(() =>
     }))
 );
 
-const renderedSkills = computed(() => {
-  const items = [];
-  const orderedEvents = [...skillTaskEvents.value];
-  for (let index = 0; index < orderedEvents.length; index += 1) {
-    const event = orderedEvents[index];
-    const payload = event.payload || {};
-    const phase = String(payload.phase || "").trim().toLowerCase();
-    const name = String(payload.name || "skill").trim() || "skill";
-    const timestamp = String(event.created_at || "");
-    const existing = [...items]
-      .reverse()
-      .find((item) => item.skillName === name && item.isOpen);
-
-    if (phase === "start" || !existing) {
-      items.push({
-        tool_use_id: event.event_id || `skill-${name}-${index}`,
-        tool_name: "skill",
-        title: `读取技能: ${name}`,
-        state:
-          phase === "loaded" ? "output-available"
-          : phase === "blocked" || phase === "error" ? "output-error"
-          : phase === "approval_required" ? "approval-requested"
-          : "input-available",
-        input: { name },
-        output:
-          phase === "loaded"
-            ? {
-                skill_root: payload.skill_root || "",
-                resource_count: Number(payload.resource_count || 0),
-              }
-            : null,
-        errorText: phase === "blocked" || phase === "error" || phase === "approval_required"
-          ? (payload.error || "")
-          : "",
-        sortTimestamp: timestamp,
-        sortOrder: index + 10000,
-        skillName: name,
-        isOpen: phase !== "loaded" && phase !== "blocked" && phase !== "error",
-      });
-      continue;
-    }
-
-    existing.state =
-      phase === "loaded" ? "output-available"
-      : phase === "blocked" || phase === "error" ? "output-error"
-      : phase === "approval_required" ? "approval-requested"
-      : existing.state;
-    existing.output =
-      phase === "loaded"
-        ? {
-            skill_root: payload.skill_root || "",
-            resource_count: Number(payload.resource_count || 0),
-          }
-        : existing.output;
-    existing.errorText =
-      phase === "blocked" || phase === "error" || phase === "approval_required"
-        ? (payload.error || "")
-        : existing.errorText;
-    existing.sortTimestamp = timestamp || existing.sortTimestamp;
-    existing.sortOrder = index + 10000;
-    existing.isOpen = phase !== "loaded" && phase !== "blocked" && phase !== "error";
-  }
-
-  return items.map(({ skillName, isOpen, ...item }) => item);
-});
-
 const renderedActivities = computed(() =>
-  [...renderedTools.value, ...renderedSkills.value]
+  [...renderedTools.value]
     .sort((a, b) => {
       const timeCompare = String(a.sortTimestamp || "").localeCompare(String(b.sortTimestamp || ""));
       if (timeCompare !== 0) return timeCompare;
@@ -322,16 +248,16 @@ const taskSummary = computed(() => {
 
 const overallState = computed(() => {
   if (task.value?.status === "failed" || task.value?.status === "cancelled") return "error";
-  if (task.value?.status === "completed") return "completed";
   const activityStates = renderedActivities.value.map((item) => item.state);
+  if (activityStates.some((state) => ["output-error", "output-denied"].includes(state))) return "error";
+  if (auxiliaryEvents.value.some((item) => item.state === "error")) return "error";
+  if (task.value?.status === "completed") return "completed";
   if (activityStates.some((state) => state === "approval-requested")) return "pending";
   if (auxiliaryEvents.value.some((item) => item.state === "pending")) return "pending";
   if (task.value?.status === "requires_action") return "pending";
   if (activityStates.some((state) => ["input-available", "input-streaming", "approval-responded"].includes(state))) return "running";
   if (auxiliaryEvents.value.some((item) => item.state === "running")) return "running";
   if (task.value?.status === "running" || task.value?.status === "queued") return "running";
-  if (activityStates.some((state) => ["output-error", "output-denied"].includes(state))) return "error";
-  if (auxiliaryEvents.value.some((item) => item.state === "error")) return "error";
   return "completed";
 });
 

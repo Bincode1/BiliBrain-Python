@@ -42,19 +42,19 @@
 
         <div v-if="currentAction.name === 'run_command'" class="flex flex-col gap-1">
           <label class="text-[10px] uppercase tracking-wider text-muted-foreground">命令</label>
-          <Input v-model.trim="editedCommand" placeholder="python -V" :disabled="isBlockedAction" class="font-mono text-xs" />
+          <input v-model.trim="editedCommand" placeholder="python -V" :disabled="isBlockedAction" class="h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 font-mono text-xs shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50" />
         </div>
 
         <template v-if="usesFilePath">
           <div class="flex flex-col gap-1">
             <label class="text-[10px] uppercase tracking-wider text-muted-foreground">路径</label>
-            <Input v-model.trim="editedPath" placeholder="notes.txt" :disabled="isBlockedAction" class="font-mono text-xs" />
+            <input v-model.trim="editedPath" placeholder="notes.txt" :disabled="isBlockedAction" class="h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 font-mono text-xs shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50" />
           </div>
         </template>
 
         <div v-if="usesContent" class="flex flex-col gap-1">
           <label class="text-[10px] uppercase tracking-wider text-muted-foreground">内容</label>
-          <Textarea v-model="editedContent" placeholder="写入文件中的正文内容..." :disabled="isBlockedAction" rows="3" class="max-h-32 font-mono text-xs" />
+          <textarea v-model="editedContent" placeholder="写入文件中的正文内容..." :disabled="isBlockedAction" rows="3" class="max-h-32 min-h-16 w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50" />
         </div>
       </div>
 
@@ -63,9 +63,9 @@
           <Button variant="ghost" @click="reject">关闭</Button>
         </template>
         <template v-else>
-          <Button @click="approve">同意执行</Button>
-          <Button variant="ghost" @click="editAndContinue">修改后继续</Button>
-          <Button variant="ghost" class="text-destructive hover:text-destructive" @click="reject">拒绝</Button>
+          <Button :disabled="submitting" @click="approve">同意执行</Button>
+          <Button variant="ghost" :disabled="submitting" @click="editAndContinue">修改后继续</Button>
+          <Button variant="ghost" class="text-destructive hover:text-destructive" :disabled="submitting" @click="reject">拒绝</Button>
         </template>
       </div>
     </div>
@@ -77,9 +77,6 @@ import { computed, nextTick, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-
 import { useChatStore } from "@/stores/chat";
 
 const store = useChatStore();
@@ -89,6 +86,7 @@ const approvalBarEl = ref(null);
 const editedCommand = ref("");
 const editedPath = ref("");
 const editedContent = ref("");
+const submitting = ref(false);
 
 const pendingApproval = computed(() => agentPendingApproval.value);
 const currentAction = computed(() => {
@@ -123,16 +121,35 @@ watch(pendingApproval, async (value) => {
   approvalBarEl.value?.scrollIntoView({ behavior: "smooth", block: "nearest" });
 });
 
+function buildEditedArgs() {
+  if (!currentAction.value) return;
+  const nextArgs = { ...(currentAction.value.args || {}) };
+  if (currentAction.value.name === "run_command") nextArgs.command = editedCommand.value || nextArgs.command || "";
+  if (usesFilePath.value) nextArgs.path = editedPath.value || nextArgs.path || "";
+  if (usesContent.value) nextArgs.content = editedContent.value ?? nextArgs.content ?? "";
+  return nextArgs;
+}
+
+async function submitDecision(decision) {
+  if (submitting.value) return;
+  submitting.value = true;
+  try {
+    await store.resumeAgentApproval(decision);
+  } finally {
+    submitting.value = false;
+  }
+}
+
 function approve() {
   if (!currentAction.value) return;
-  store.resumeAgentApproval({
+  submitDecision({
     type: "approve",
     name: currentAction.value.name,
-    args: currentAction.value.args || {},
+    args: buildEditedArgs(),
   });
 }
 function reject() {
-  store.resumeAgentApproval({
+  submitDecision({
     type: "reject",
     message: isBlockedAction.value
       ? `用户关闭了被策略禁止的操作：${currentAction.value?.policy_reason || "策略已阻止该操作"}。`
@@ -143,14 +160,10 @@ function reject() {
 }
 function editAndContinue() {
   if (!currentAction.value) return;
-  const nextArgs = { ...(currentAction.value.args || {}) };
-  if (currentAction.value.name === "run_command") nextArgs.command = editedCommand.value || nextArgs.command || "";
-  if (usesFilePath.value) nextArgs.path = editedPath.value || nextArgs.path || "";
-  if (usesContent.value) nextArgs.content = editedContent.value ?? nextArgs.content ?? "";
-  store.resumeAgentApproval({
+  submitDecision({
     type: "edit",
     name: currentAction.value.name,
-    args: nextArgs,
+    args: buildEditedArgs(),
   });
 }
 </script>
