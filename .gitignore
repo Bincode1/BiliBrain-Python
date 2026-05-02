@@ -44,8 +44,12 @@ progress.md
 task_plan.md
 .playwright-cli/
 bilibrain/.playwright-cli/
+tmp_ps_test*/
 bilibrain/tests/
 bilibrain/**/tests/
+bilibrain/scripts/
+bilibrain/bilibrain/benchmarking.py
+docs/benchmarks/
 **/test_*.py
 **/*.spec.js
 **/*.spec.ts
@@ -55,6 +59,9 @@ bilibrain/**/tests/
 **/*.test.tsx
 
 # Local project artifacts
+.superpowers/
+artifacts/
+bilibrain/artifacts/
 .agents/
 .kilo/
 .trae/
