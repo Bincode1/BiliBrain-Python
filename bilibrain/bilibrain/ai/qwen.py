@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from bilibrain.ai.provider import (
+    build_langchain_chat_model,
+    ensure_endpoint_configured,
+    resolve_chat_endpoint,
+)
 from bilibrain.core.config import Settings
 from bilibrain.prompts import (
     build_memory_compact_messages,
@@ -12,26 +17,14 @@ from bilibrain.prompts import (
 )
 
 
-class QwenClient:
+class ChatClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        try:
-            from langchain_qwq import ChatQwen
-        except ModuleNotFoundError as exc:
-            raise RuntimeError("langchain_qwq is not installed") from exc
-        self.model = ChatQwen(
-            model=settings.llm_model,
-            api_key=settings.dashscope_api_key,
-            base_url=settings.dashscope_base_url,
-            temperature=0,
-            streaming=True,
-            enable_thinking=False,
-        )
+        self.endpoint = resolve_chat_endpoint(settings)
+        self.model = build_langchain_chat_model(self.endpoint)
 
     def ensure_configured(self) -> None:
-        if not self.settings.dashscope_api_key:
-            raise RuntimeError("DASHSCOPE_API_KEY not set")
-
+        ensure_endpoint_configured(self.endpoint)
 
     async def compact_conversation_memory(
         self,
@@ -124,3 +117,6 @@ class QwenClient:
 
     async def close(self) -> None:
         return None
+
+
+QwenClient = ChatClient

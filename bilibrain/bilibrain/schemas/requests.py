@@ -45,21 +45,19 @@ class TagsRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+class ModelEndpointSettings(BaseModel):
+    model: str = Field(default="")
+    base_url: str = Field(default="")
+    api_key: str = Field(default="")
+
+
 class ModelSettingsRequest(BaseModel):
-    llm_model: str = Field(..., min_length=1)
-    dashscope_api_key: str = Field(default="")
-    dashscope_base_url: str = Field(default="")
-    embedding_model: str = Field(default="")
-    ollama_base_url: str = Field(default="")
-    asr_api_model: str = Field(default="")
-    asr_api_base_url: str = Field(default="")
+    chat: ModelEndpointSettings = Field(default_factory=ModelEndpointSettings)
+    embedding: ModelEndpointSettings = Field(default_factory=ModelEndpointSettings)
+    asr: ModelEndpointSettings = Field(default_factory=ModelEndpointSettings)
 
 
 class ModelSettingsResponse(BaseModel):
-    llm_model: str
-    dashscope_api_key: str
-    dashscope_base_url: str
-    embedding_model: str
-    ollama_base_url: str
-    asr_api_model: str
-    asr_api_base_url: str
+    chat: ModelEndpointSettings
+    embedding: ModelEndpointSettings
+    asr: ModelEndpointSettings

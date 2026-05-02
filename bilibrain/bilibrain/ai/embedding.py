@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
-import httpx
-
+from bilibrain.ai.provider import (
+    build_langchain_embedding_model,
+    ensure_endpoint_configured,
+    resolve_embedding_endpoint,
+)
 from bilibrain.core.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -21,16 +25,11 @@ def _estimate_tokens(text: str) -> int:
 class EmbeddingClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._client: httpx.AsyncClient | None = None
-
-    def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=30)
-        return self._client
+        self.endpoint = resolve_embedding_endpoint(settings)
+        self._embedder: Any | None = None
 
     def ensure_configured(self) -> None:
-        if not self.settings.dashscope_api_key:
-            raise RuntimeError("DASHSCOPE_API_KEY not set")
+        ensure_endpoint_configured(self.endpoint)
 
     def _truncate(self, text: str) -> str:
         estimated = _estimate_tokens(text)
@@ -63,26 +62,7 @@ class EmbeddingClient:
         return batches
 
     async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
-        client = self._get_client()
-        response = await client.post(
-            f"{self.settings.dashscope_base_url}/embeddings",
-            headers={"Authorization": f"Bearer {self.settings.dashscope_api_key}"},
-            json={
-                "model": self.settings.embedding_model,
-                "input": batch,
-                "dimensions": self.settings.embedding_dimension,
-            },
-        )
-        if response.status_code != 200:
-            logger.error(
-                "Embedding API error: status=%s body=%s",
-                response.status_code,
-                response.text[:500],
-            )
-        response.raise_for_status()
-        data = response.json()
-        results = sorted(data["data"], key=lambda x: x["index"])
-        return [item["embedding"] for item in results]
+        return await self._get_embedder().aembed_documents(batch)
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         self.ensure_configured()
@@ -112,7 +92,13 @@ class EmbeddingClient:
             embeddings.extend(batch_result)
         return embeddings
 
+    def _get_embedder(self):
+        if self._embedder is None:
+            self._embedder = build_langchain_embedding_model(
+                self.endpoint,
+                dimensions=self.settings.embedding_dimension,
+            )
+        return self._embedder
+
     async def close(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        return None

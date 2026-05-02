@@ -63,7 +63,11 @@ class Settings:
     dashscope_api_key: str
     dashscope_base_url: str
     llm_model: str
+    chat_api_key: str
+    chat_api_base_url: str
+    chat_api_model: str
     asr_language: str
+    asr_api_key: str
     asr_api_base_url: str
     asr_api_model: str
     asr_enable_itn: bool
@@ -78,6 +82,9 @@ class Settings:
     asr_silence_noise_db: float
     ollama_base_url: str
     embedding_model: str
+    embedding_api_key: str
+    embedding_api_base_url: str
+    embedding_api_model: str
     bili_api_delay: float
     session_cache_ttl_seconds: int
     folder_list_cache_ttl_seconds: int
@@ -161,7 +168,11 @@ def get_settings() -> Settings:
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
         ).rstrip("/"),
         llm_model=os.getenv("LLM_MODEL", "qwen-plus"),
+        chat_api_key=os.getenv("CHAT_API_KEY", "").strip(),
+        chat_api_base_url=os.getenv("CHAT_API_BASE_URL", "").rstrip("/"),
+        chat_api_model=os.getenv("CHAT_API_MODEL", "").strip(),
         asr_language=os.getenv("ASR_LANGUAGE", "zh").strip(),
+        asr_api_key=os.getenv("ASR_API_KEY", "").strip(),
         asr_api_base_url=os.getenv(
             "ASR_API_BASE_URL",
             os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
@@ -179,6 +190,9 @@ def get_settings() -> Settings:
         asr_silence_noise_db=_float("ASR_SILENCE_NOISE_DB", -35.0),
         ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
         embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-v4"),
+        embedding_api_key=os.getenv("EMBEDDING_API_KEY", "").strip(),
+        embedding_api_base_url=os.getenv("EMBEDDING_API_BASE_URL", "").rstrip("/"),
+        embedding_api_model=os.getenv("EMBEDDING_API_MODEL", "").strip(),
         bili_api_delay=_float("BILI_API_DELAY", 1.0),
         session_cache_ttl_seconds=_int("SESSION_CACHE_TTL_SECONDS", 60),
         folder_list_cache_ttl_seconds=_int("FOLDER_LIST_CACHE_TTL_SECONDS", 300),

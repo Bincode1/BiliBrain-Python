@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 
+from bilibrain.ai.provider import ensure_endpoint_configured, resolve_asr_endpoint
 from bilibrain.core.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -23,14 +24,10 @@ class RetryableAsrError(RuntimeError):
 class QwenAsrClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.endpoint = resolve_asr_endpoint(settings)
 
     def ensure_configured(self) -> None:
-        if not self.settings.dashscope_api_key:
-            raise RuntimeError("DASHSCOPE_API_KEY not set")
-        if not self.settings.asr_api_base_url:
-            raise RuntimeError("ASR_API_BASE_URL not set")
-        if not self.settings.asr_api_model:
-            raise RuntimeError("ASR_API_MODEL not set")
+        ensure_endpoint_configured(self.endpoint)
 
     async def transcribe(self, audio_path: Path) -> str:
         self.ensure_configured()
@@ -38,7 +35,7 @@ class QwenAsrClient:
         audio_bytes = await asyncio.to_thread(self._read_audio_bytes, normalized_path)
         payload = self._build_request_payload(audio_bytes, normalized_path)
         headers = {
-            "Authorization": f"Bearer {self.settings.dashscope_api_key}",
+            "Authorization": f"Bearer {self.endpoint.api_key}",
             "Content-Type": "application/json",
         }
         started = perf_counter()
@@ -51,12 +48,12 @@ class QwenAsrClient:
                     "Qwen ASR request started: file=%s size=%s model=%s attempt=%s/%s",
                     normalized_path.name,
                     len(audio_bytes),
-                    self.settings.asr_api_model,
+                    self.endpoint.model,
                     attempt,
                     attempts,
                 )
                 async with httpx.AsyncClient(
-                    base_url=self.settings.asr_api_base_url,
+                    base_url=self.endpoint.base_url,
                     timeout=self.settings.asr_api_timeout_seconds,
                 ) as client:
                     response = await client.post(
@@ -100,7 +97,7 @@ class QwenAsrClient:
         raise RuntimeError(f"Qwen ASR 转写失败: {last_error}") from last_error
 
     def model_label(self) -> str:
-        return f"dashscope/{self.settings.asr_api_model}"
+        return f"api/{self.endpoint.model}"
 
     def _build_request_payload(
         self,
@@ -112,7 +109,7 @@ class QwenAsrClient:
             f"{base64.b64encode(audio_bytes).decode('ascii')}"
         )
         return {
-            "model": self.settings.asr_api_model,
+            "model": self.endpoint.model,
             "messages": [
                 {
                     "role": "user",

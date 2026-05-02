@@ -6,6 +6,7 @@ from time import perf_counter
 
 from langgraph.runtime import Runtime as GraphRuntime
 
+from bilibrain.ai.provider import resolve_embedding_endpoint
 from bilibrain.graphs.ingestion.helpers import (
     audio_display_path,
     build_segment_inputs,
@@ -230,7 +231,7 @@ async def build_index_segments(
         "running",
         substage="chunking",
         substage_label="正在切分文本",
-        model=app_runtime.settings.embedding_model,
+        model=resolve_embedding_endpoint(app_runtime.settings).model,
         count=0,
     )
     merged_segments = merge_transcript_segments(
@@ -266,7 +267,7 @@ async def embed_index_segments(
         "running",
         substage="embedding",
         substage_label="正在生成向量",
-        model=app_runtime.settings.embedding_model,
+        model=resolve_embedding_endpoint(app_runtime.settings).model,
         count=len(merged_segments),
     )
     embeddings = await app_runtime.embedder.embed_texts(
@@ -306,7 +307,7 @@ async def upsert_index_chunks(
         "running",
         substage="vector_upsert",
         substage_label="正在写入向量库",
-        model=app_runtime.settings.embedding_model,
+        model=resolve_embedding_endpoint(app_runtime.settings).model,
         count=len(chunk_rows),
     )
     await app_runtime.vector_store.areplace_video_chunks(
@@ -337,7 +338,7 @@ async def upsert_index_chunks(
         "done",
         substage=None,
         substage_label="",
-        model=app_runtime.settings.embedding_model,
+        model=resolve_embedding_endpoint(app_runtime.settings).model,
         count=len(chunk_rows),
     )
     return {
