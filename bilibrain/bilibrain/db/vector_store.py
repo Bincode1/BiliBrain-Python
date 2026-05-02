@@ -12,6 +12,10 @@ from bilibrain.core.config import Settings
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_RRF_DENSE_WEIGHT = 0.05
+DEFAULT_RRF_BM25_WEIGHT = 0.95
+DEFAULT_RRF_K = 10
+
 
 @dataclass(frozen=True)
 class _SearchResult:
@@ -62,9 +66,9 @@ def _build_bm25_snapshot(
 def rrf_merge(
     dense_results: list[_SearchResult],
     bm25_results: list[_SearchResult],
-    dense_weight: float = 0.65,
-    bm25_weight: float = 0.35,
-    k: int = 60,
+    dense_weight: float = DEFAULT_RRF_DENSE_WEIGHT,
+    bm25_weight: float = DEFAULT_RRF_BM25_WEIGHT,
+    k: int = DEFAULT_RRF_K,
 ) -> list[tuple[str, float]]:
     scores: dict[str, float] = {}
     for rank, item in enumerate(dense_results):
@@ -267,7 +271,7 @@ class LocalVectorStore:
         dense_kwargs: dict[str, Any] = {
             "query_embeddings": [query_embedding],
             "n_results": limit,
-            "include": ["metadatas", "documents"],
+            "include": ["metadatas", "documents", "distances"],
         }
         if where_filter:
             dense_kwargs["where"] = where_filter

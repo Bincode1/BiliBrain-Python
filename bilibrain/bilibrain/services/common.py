@@ -127,6 +127,28 @@ def _hard_split_text(text: str, *, max_chars: int, max_tokens: int) -> list[str]
     return pieces
 
 
+def _append_bounded_text(
+    parts: list[str],
+    text: str,
+    *,
+    max_chars: int,
+    max_tokens: int,
+) -> None:
+    payload = str(text or "").strip()
+    if not payload:
+        return
+    if len(payload) <= max_chars and estimate_text_tokens(payload) <= max_tokens:
+        parts.append(payload)
+        return
+    parts.extend(
+        _hard_split_text(
+            payload,
+            max_chars=max_chars,
+            max_tokens=max_tokens,
+        )
+    )
+
+
 def _split_semantic_text(text: str, *, max_chars: int, max_tokens: int) -> list[str]:
     payload = str(text or "").strip()
     if not payload:
@@ -157,23 +179,23 @@ def _split_semantic_text(text: str, *, max_chars: int, max_tokens: int) -> list[
                     or estimate_text_tokens(candidate_text) > safe_max_tokens
                 )
             ):
-                semantic_parts.append(_join_text_parts(current_parts))
+                _append_bounded_text(
+                    semantic_parts,
+                    _join_text_parts(current_parts),
+                    max_chars=safe_max_chars,
+                    max_tokens=safe_max_tokens,
+                )
                 current_parts = [clause]
                 continue
             current_parts = candidate_parts
 
         if current_parts:
-            merged_clause = _join_text_parts(current_parts)
-            if len(merged_clause) > safe_max_chars or estimate_text_tokens(merged_clause) > safe_max_tokens:
-                semantic_parts.extend(
-                    _hard_split_text(
-                        merged_clause,
-                        max_chars=safe_max_chars,
-                        max_tokens=safe_max_tokens,
-                    )
-                )
-            else:
-                semantic_parts.append(merged_clause)
+            _append_bounded_text(
+                semantic_parts,
+                _join_text_parts(current_parts),
+                max_chars=safe_max_chars,
+                max_tokens=safe_max_tokens,
+            )
 
     return [part for part in semantic_parts if part]
 
@@ -224,7 +246,14 @@ def _expand_semantic_units(
     return expanded
 
 
-def _build_sentence_units(segments: list[dict[str, Any]], *, max_gap: float) -> list[dict[str, Any]]:
+def _build_sentence_units(
+    segments: list[dict[str, Any]],
+    *,
+    max_gap: float,
+    max_chars: int | None = None,
+    max_tokens: int | None = None,
+    max_duration: float | None = None,
+) -> list[dict[str, Any]]:
     units: list[dict[str, Any]] = []
     current_parts: list[str] = []
     current_start: float | None = None
@@ -269,6 +298,18 @@ def _build_sentence_units(segments: list[dict[str, Any]], *, max_gap: float) -> 
             flush()
             pending_hard_boundary = True
 
+        budget_break = False
+        if current_parts and current_start is not None:
+            candidate_text = _join_text_parts([*current_parts, content])
+            candidate_duration = end_seconds - current_start
+            budget_break = (
+                (max_chars is not None and len(candidate_text) > max_chars)
+                or (max_tokens is not None and estimate_text_tokens(candidate_text) > max_tokens)
+                or (max_duration is not None and candidate_duration > max_duration)
+            )
+        if budget_break:
+            flush()
+
         if current_start is None:
             current_start = start_seconds
             current_hard_boundary = pending_hard_boundary
@@ -301,7 +342,13 @@ def merge_transcript_segments(
     # guardrail so the packer does not stop too early on Chinese transcripts.
     effective_target_chars = max(safe_target_chars, safe_max_tokens * 2)
     units = _expand_semantic_units(
-        _build_sentence_units(segments, max_gap=max_gap),
+        _build_sentence_units(
+            segments,
+            max_gap=max_gap,
+            max_chars=effective_target_chars,
+            max_tokens=safe_max_tokens,
+            max_duration=max_duration,
+        ),
         max_chars=effective_target_chars,
         max_tokens=safe_max_tokens,
     )
