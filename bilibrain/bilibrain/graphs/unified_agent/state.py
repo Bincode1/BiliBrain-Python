@@ -25,6 +25,7 @@ class UnifiedAgentState(TypedDict, total=False):
     pending_tool_calls: list[dict[str, Any]]
     current_tool_call: dict[str, Any] | None
     current_tool_use_id: str | None
+    current_tool_approval_mode: Any
     current_tool_result: str | None
 
     collected_sources: list[dict[str, str]]

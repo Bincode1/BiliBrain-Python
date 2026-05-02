@@ -27,6 +27,7 @@ from bilibrain.services.chat_storage import (
 )
 from bilibrain.services.task_execution import mark_task_running_after_approval
 from bilibrain.services import unified_agent as legacy_unified_agent
+from bilibrain.tools.contracts import ToolApprovalMode
 
 _HITL_TOOLS = {"run_command", "write_file", "append_file", "make_dir", "obsidian_write_note"}
 
@@ -49,6 +50,38 @@ def _tool_use_event_payload(tool_use: dict[str, object] | None) -> dict[str, obj
     }
 
 
+def _resolve_tool_call_chunk_index(
+    chunks: list[dict[str, str]],
+    *,
+    raw_index: object,
+    tool_call_id: object,
+    tool_name: object,
+) -> int:
+    if isinstance(raw_index, int) and raw_index >= 0:
+        return raw_index
+    if isinstance(raw_index, str) and raw_index.isdigit():
+        return int(raw_index)
+
+    normalized_id = str(tool_call_id or "").strip()
+    if normalized_id:
+        for index, entry in enumerate(chunks):
+            if str(entry.get("id") or "").strip() == normalized_id:
+                return index
+
+    normalized_name = str(tool_name or "").strip()
+    if chunks:
+        last_index = len(chunks) - 1
+        last_entry = chunks[last_index]
+        last_id = str(last_entry.get("id") or "").strip()
+        last_name = str(last_entry.get("name") or "").strip()
+        if (not normalized_id or not last_id or last_id == normalized_id) and (
+            not normalized_name or not last_name or last_name == normalized_name
+        ):
+            return last_index
+
+    return len(chunks)
+
+
 async def model_step(
     state: UnifiedAgentState,
     runtime: GraphRuntime[UnifiedAgentContext],
@@ -65,7 +98,7 @@ async def model_step(
     llm = app_runtime.qwen.model.bind_tools(tools)
 
     full_text = ""
-    tool_call_chunks_acc: list[dict[str, str | int]] = []
+    tool_call_chunks_acc: list[dict[str, str]] = []
 
     async for chunk in llm.astream(messages):
         tc_chunks = getattr(chunk, "tool_call_chunks", None) or []
@@ -74,12 +107,18 @@ async def model_step(
                 name = tcc.get("name")
                 args_str = tcc.get("args", "")
                 tc_id = tcc.get("id")
-                idx = tcc.get("index", 0)
+                raw_index = tcc.get("index")
             else:
                 name = getattr(tcc, "name", None)
                 args_str = getattr(tcc, "args", "")
                 tc_id = getattr(tcc, "id", None)
-                idx = getattr(tcc, "index", 0)
+                raw_index = getattr(tcc, "index", None)
+            idx = _resolve_tool_call_chunk_index(
+                tool_call_chunks_acc,
+                raw_index=raw_index,
+                tool_call_id=tc_id,
+                tool_name=name,
+            )
             while len(tool_call_chunks_acc) <= idx:
                 tool_call_chunks_acc.append({"name": "", "args": "", "id": ""})
             entry = tool_call_chunks_acc[idx]
@@ -262,7 +301,10 @@ async def approval_gate(
             },
         )
     return Command(
-        update={"current_tool_call": {**current, "args": effective_args}},
+        update={
+            "current_tool_call": {**current, "args": effective_args},
+            "current_tool_approval_mode": ToolApprovalMode.PREAPPROVED.value,
+        },
         goto="execute_tool",
     )
 
@@ -314,16 +356,31 @@ async def execute_tool(
             except Exception as exc:
                 raw_result = {"error": str(exc)}
             result_str, parsed = normalize_tool_result(raw_result)
+            tool_failed = bool(
+                isinstance(parsed, dict)
+                and (parsed.get("error") or parsed.get("ok") is False)
+            )
+            tool_error = None
+            if tool_failed:
+                raw_error = parsed.get("error") if isinstance(parsed, dict) else None
+                if isinstance(raw_error, dict):
+                    tool_error = raw_error
+                elif raw_error:
+                    tool_error = {"message": str(raw_error)}
+                else:
+                    payload = parsed.get("payload") if isinstance(parsed.get("payload"), dict) else {}
+                    stderr = str(payload.get("stderr") or "").strip()
+                    exit_code = payload.get("exit_code")
+                    message = stderr or f"Tool returned ok=false{f' with exit code {exit_code}' if exit_code is not None else ''}."
+                    tool_error = {"message": message}
             final_tool_use = await replace_chat_tool_use(
                 app_runtime,
                 conversation_id,
                 tool_use_id=tool_use_id,
-                status="completed" if not (parsed or {}).get("error") else "failed",
+                status="failed" if tool_failed else "completed",
                 raw_input=tool_args,
                 raw_output=parsed if parsed is not None else {"text": result_str},
-                error=(parsed or {}).get("error") if isinstance((parsed or {}).get("error"), dict) else (
-                    {"message": str((parsed or {}).get("error") or "")} if (parsed or {}).get("error") else None
-                ),
+                error=tool_error,
                 request_id=tool_use_id,
                 finished_at=now_text(),
             )
@@ -356,6 +413,7 @@ async def execute_tool(
             "current_tool_result": result_str,
             "current_tool_call": None,
             "current_tool_use_id": None,
+            "current_tool_approval_mode": None,
             "collected_sources": merge_collected_sources(
                 list(state.get("collected_sources") or []),
                 new_sources,

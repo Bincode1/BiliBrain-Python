@@ -85,6 +85,7 @@ async def load_context(
         "pending_tool_calls": [],
         "current_tool_call": None,
         "current_tool_use_id": None,
+        "current_tool_approval_mode": None,
         "current_tool_result": None,
         "pending_answer_text": "",
         "answer_text": "",
@@ -102,7 +103,9 @@ def build_tools(
     context = runtime.context or {}
     app_runtime = context["runtime"]
     actor = str(context.get("actor") or "agent")
-    approval_mode = context.get("approval_mode")
+    approval_mode = state.get("current_tool_approval_mode")
+    if approval_mode is None:
+        approval_mode = context.get("approval_mode")
     event_callback = build_event_callback(state, runtime)
     new_sources: list[dict[str, str]] = []
 

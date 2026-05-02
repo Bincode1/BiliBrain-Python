@@ -64,6 +64,9 @@ def tool_name(tool: Any) -> str:
 
 
 def normalize_tool_result(result: Any) -> tuple[str, dict[str, Any] | None]:
+    if hasattr(result, "model_dump"):
+        dumped = result.model_dump()
+        return json.dumps(dumped, ensure_ascii=False), dumped if isinstance(dumped, dict) else None
     if isinstance(result, str):
         try:
             parsed = json.loads(result)
